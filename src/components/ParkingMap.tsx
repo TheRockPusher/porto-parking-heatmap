@@ -1,204 +1,180 @@
-import { useCallback, useMemo } from "react";
-import { Map } from "react-map-gl/maplibre";
-import { DeckGL } from "@deck.gl/react";
-import type { Layer, PickingInfo, MapViewState } from "deck.gl";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { Map, Source, Layer, NavigationControl, ScaleControl } from "react-map-gl/maplibre";
+import type { MapRef } from "react-map-gl/maplibre";
+import type { ExpressionSpecification, StyleSpecification } from "maplibre-gl";
+import type { Geometry } from "geojson";
+import { RotateCcw } from "lucide-react";
+import { ZONE_COLORS } from "../lib/parking";
+import type { LayerKind, ParkingData, ParkingFeature, SpaceStatus } from "../types";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import type { BlockData, StationData, TimeSlot, ViewMode } from "../types";
-import { createParkingHeatmapLayer } from "../layers/parkingHeatmapLayer";
-import { createParkingColumnLayer } from "../layers/parkingColumnLayer";
-import type { ColumnStyle } from "../layers/parkingColumnLayer";
-import { createParkingDeltaColumnLayer } from "../layers/parkingDeltaColumnLayer";
-import { createParkingPathLayers } from "../layers/parkingPathLayer";
-import { createParkingDeltaPathLayers } from "../layers/parkingDeltaPathLayer";
-import { createMeterDotsLayer } from "../layers/meterDotsLayer";
-import { createBikeHeatmapLayer } from "../layers/bikeHeatmapLayer";
-import { createBikeScatterLayer } from "../layers/bikeScatterLayer";
-import { createCorrelationLayer } from "../layers/correlationLayer";
-import { getBlockTooltipContent, getDeltaTooltipContent } from "./BlockTooltip";
-import { getStationTooltipContent, getCorrelationTooltipContent } from "./BikeTooltip";
+const PORTO_VIEW = { longitude: -8.635, latitude: 41.157, zoom: 12.7, bearing: 0, pitch: 0 };
+const MAP_STYLE: StyleSpecification = {
+  version: 8,
+  sources: {
+    basemap: {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>',
+    },
+  },
+  layers: [
+    { id: "background", type: "background", paint: { "background-color": "#e8eee9" } },
+    { id: "basemap", type: "raster", source: "basemap", paint: { "raster-saturation": -0.5, "raster-opacity": 0.85 } },
+  ],
+};
+const ZONE_COLOR: ExpressionSpecification = [
+  "match", ["get", "zone"],
+  "I", ZONE_COLORS.I, "II", ZONE_COLORS.II,
+  "III", ZONE_COLORS.III, "IV", ZONE_COLORS.IV, "#667085",
+];
+const INTERACTIVE_LAYERS: Record<LayerKind, string> = {
+  zones: "tariff-zones", streets: "paid-streets", spaces: "paid-spaces", garages: "municipal-garages",
+};
 
-const MAP_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
-
-// Zoom tier boundaries
-const COLUMN_ZOOM_MIN = 13;
-const SCATTER_ZOOM_MIN = 15.5;
-const METER_DOTS_ZOOM_MIN = 18;
-
-type ZoomTier = "heatmap" | "columns" | "scatter";
-
-function getZoomTier(zoom: number): ZoomTier {
-  if (zoom >= SCATTER_ZOOM_MIN) return "scatter";
-  if (zoom >= COLUMN_ZOOM_MIN) return "columns";
-  return "heatmap";
+function geometryBounds(geometry: Geometry): [[number, number], [number, number]] {
+  const bounds: [[number, number], [number, number]] = [[Infinity, Infinity], [-Infinity, -Infinity]];
+  function visitCoordinates(value: unknown) {
+    if (!Array.isArray(value)) return;
+    if (typeof value[0] === "number" && typeof value[1] === "number") {
+      bounds[0][0] = Math.min(bounds[0][0], value[0]);
+      bounds[0][1] = Math.min(bounds[0][1], value[1]);
+      bounds[1][0] = Math.max(bounds[1][0], value[0]);
+      bounds[1][1] = Math.max(bounds[1][1], value[1]);
+    } else {
+      value.forEach(visitCoordinates);
+    }
+  }
+  function visitGeometry(value: Geometry) {
+    if (value.type === "GeometryCollection") value.geometries.forEach(visitGeometry);
+    else visitCoordinates(value.coordinates);
+  }
+  visitGeometry(geometry);
+  return bounds;
 }
 
 interface ParkingMapProps {
-  blocks: BlockData[];
-  timeSlot: TimeSlot;
-  selectedBlockId: string | null;
-  viewState: MapViewState;
-  onViewStateChange: (vs: MapViewState) => void;
-  onBlockClick: (block: BlockData | null) => void;
-  onMapClick?: (coordinate: [number, number]) => void;
-  extraLayers?: Layer[];
-  comparing?: boolean;
-  referenceSlot?: TimeSlot | null;
-  columnStyle?: ColumnStyle;
-  viewMode?: ViewMode;
-  stations?: StationData[];
-  selectedStationId?: string | null;
-  onStationClick?: (station: StationData | null) => void;
-  nearestStations?: Map<string, StationData[]>;
+  data: ParkingData;
+  layers: LayerKind[];
+  statuses: SpaceStatus[];
+  selected: ParkingFeature | null;
+  resetKey: number;
+  onSelect: (id: string) => void;
 }
 
-export function ParkingMap({
-  blocks,
-  timeSlot,
-  selectedBlockId,
-  viewState,
-  onViewStateChange,
-  onBlockClick,
-  onMapClick,
-  extraLayers,
-  comparing,
-  referenceSlot,
-  columnStyle = "hexgrid",
-  viewMode = "parking",
-  stations = [],
-  selectedStationId,
-  onStationClick,
-  nearestStations,
-}: ParkingMapProps) {
-  const zoom = viewState.zoom;
-  const tier = getZoomTier(zoom);
+class MapBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
 
-  // Pre-split blocks by path availability once (stable references for deck.gl)
-  const withPath = useMemo(
-    () => blocks.filter((b) => b.path && b.path.length >= 2),
-    [blocks],
-  );
-  const withoutPath = useMemo(
-    () => blocks.filter((b) => !b.path || b.path.length < 2),
-    [blocks],
-  );
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
 
-  const showMeterDots = zoom >= METER_DOTS_ZOOM_MIN;
-
-  // Memoize layers so they aren't recreated on every pan/zoom frame
-  const dataLayers = useMemo(() => {
-    const layers: Layer[] = [];
-
-    if (viewMode === "bike") {
-      // Bike mode: heatmap at low zoom, scatter at mid+
-      if (tier === "heatmap") {
-        layers.push(createBikeHeatmapLayer(stations, timeSlot));
-      } else {
-        layers.push(createBikeScatterLayer(stations, timeSlot, selectedStationId ?? null));
-      }
-      return layers;
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="map-fallback" role="status">
+          <h2>The map could not start</h2>
+          <p>WebGL may be unavailable in this browser. All parking records, search results and source details are still available in the explorer.</p>
+          <button className="button" onClick={() => this.setState({ failed: false })}>Try the map again</button>
+        </div>
+      );
     }
+    return this.props.children;
+  }
+}
 
-    if (viewMode === "correlation") {
-      // Correlation mode: parking layers as base + correlation overlay
-      if (tier === "scatter") {
-        layers.push(...createParkingPathLayers(withPath, withoutPath, timeSlot, selectedBlockId));
-      } else if (tier === "columns") {
-        layers.push(...createParkingColumnLayer(blocks, timeSlot, selectedBlockId, columnStyle));
-      } else {
-        layers.push(createParkingHeatmapLayer(blocks, timeSlot));
-      }
-      // Add correlation overlay if we have station data
-      if (nearestStations && nearestStations.size > 0) {
-        layers.push(createCorrelationLayer(blocks, timeSlot, nearestStations));
-      }
-      return layers;
+function PortoMap({ data, layers, statuses, selected, resetKey, onSelect }: ParkingMapProps) {
+  const map = useRef<MapRef>(null);
+  const [ready, setReady] = useState(false);
+  const [mapError, setMapError] = useState(false);
+  const [hovering, setHovering] = useState(false);
+  const [tileAttempt, setTileAttempt] = useState(0);
+  const visibleSpaces = useMemo(() => ({
+    ...data.collections.spaces,
+    features: data.collections.spaces.features.filter((feature) => statuses.includes(feature.properties.status)),
+  }), [data, statuses]);
+  const selectedData = useMemo(() => ({
+    type: "FeatureCollection" as const,
+    features: selected ? [selected] : [],
+  }), [selected]);
+
+  useEffect(() => {
+    if (ready) map.current?.jumpTo(PORTO_VIEW);
+  }, [resetKey, ready]);
+  useEffect(() => {
+    if (!ready || !selected || !map.current) return;
+    const bounds = geometryBounds(selected.geometry);
+    if (bounds.flat().every(Number.isFinite)) {
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      map.current.fitBounds(bounds, { padding: 72, maxZoom: 17, duration: reducedMotion ? 0 : 650 });
     }
+  }, [selected, ready]);
 
-    // Parking mode (default)
-    if (comparing && referenceSlot) {
-      if (tier === "scatter") {
-        layers.push(...createParkingDeltaPathLayers(withPath, withoutPath, timeSlot, referenceSlot, selectedBlockId));
-      } else if (tier === "columns") {
-        layers.push(createParkingDeltaColumnLayer(blocks, timeSlot, referenceSlot, selectedBlockId));
-      } else {
-        layers.push(createParkingHeatmapLayer(blocks, timeSlot));
-      }
-    } else {
-      if (tier === "scatter") {
-        layers.push(...createParkingPathLayers(withPath, withoutPath, timeSlot, selectedBlockId));
-      } else if (tier === "columns") {
-        layers.push(...createParkingColumnLayer(blocks, timeSlot, selectedBlockId, columnStyle));
-      } else {
-        layers.push(createParkingHeatmapLayer(blocks, timeSlot));
-      }
-    }
-
-    // Add individual meter dots at deep zoom
-    if (showMeterDots) {
-      layers.push(createMeterDotsLayer(blocks, timeSlot));
-    }
-
-    return layers;
-  }, [blocks, withPath, withoutPath, tier, timeSlot, selectedBlockId, comparing, referenceSlot, showMeterDots, columnStyle, viewMode, stations, selectedStationId, nearestStations]);
-
-  const layers = useMemo(
-    () => [...dataLayers, ...(extraLayers ?? [])],
-    [dataLayers, extraLayers],
-  );
-
-  const handleClick = useCallback(
-    (info: PickingInfo) => {
-      if (info.object) {
-        if (viewMode === "bike" && onStationClick) {
-          onStationClick(info.object as StationData);
-        } else {
-          onBlockClick(info.object as BlockData);
-        }
-      } else if (onMapClick && info.coordinate) {
-        onMapClick(info.coordinate as [number, number]);
-      } else {
-        if (viewMode === "bike" && onStationClick) {
-          onStationClick(null);
-        } else {
-          onBlockClick(null);
-        }
-      }
-    },
-    [onBlockClick, onMapClick, onStationClick, viewMode],
-  );
-
-  const getTooltip = useCallback(
-    (info: PickingInfo) => {
-      if (!info.object) return null;
-      if (viewMode === "bike") {
-        return getStationTooltipContent(info.object as StationData, timeSlot);
-      }
-      if (viewMode === "correlation") {
-        const block = info.object as BlockData;
-        const nearby = nearestStations?.get(block.id);
-        return getCorrelationTooltipContent(block, nearby, timeSlot);
-      }
-      if (comparing && referenceSlot) {
-        return getDeltaTooltipContent(info.object as BlockData, timeSlot, referenceSlot);
-      }
-      return getBlockTooltipContent(info.object as BlockData, timeSlot);
-    },
-    [timeSlot, comparing, referenceSlot, viewMode, nearestStations],
-  );
 
   return (
-    <DeckGL
-      viewState={viewState}
-      onViewStateChange={({ viewState: vs }) =>
-        onViewStateChange(vs as MapViewState)
-      }
-      layers={layers}
-      onClick={handleClick}
-      getTooltip={getTooltip}
-      controller
-    >
-      <Map mapStyle={MAP_STYLE} />
-    </DeckGL>
+    <>
+      <Map
+        key={tileAttempt}
+        ref={map}
+        initialViewState={PORTO_VIEW}
+        mapStyle={MAP_STYLE}
+        minZoom={10}
+        maxZoom={20}
+        maxBounds={[[-8.85, 41.05], [-8.45, 41.27]]}
+        dragRotate={false}
+        touchPitch={false}
+        attributionControl={{ compact: false }}
+        interactiveLayerIds={layers.map((kind) => INTERACTIVE_LAYERS[kind])}
+        cursor={hovering ? "pointer" : "grab"}
+        onLoad={() => setReady(true)}
+        onError={() => setMapError(true)}
+        onMouseMove={(event) => setHovering(Boolean(event.features?.length))}
+        onMouseLeave={() => setHovering(false)}
+        onClick={(event) => {
+          const feature = event.features?.[0];
+          if (feature?.properties?.id) onSelect(String(feature.properties.id));
+        }}
+      >
+        <NavigationControl position="top-right" showCompass={false} />
+        <ScaleControl position="bottom-left" unit="metric" />
+        <Source id="zones" type="geojson" data={data.collections.zones}>
+          <Layer id="tariff-zones" type="fill" layout={{ visibility: layers.includes("zones") ? "visible" : "none" }} paint={{ "fill-color": ZONE_COLOR, "fill-opacity": 0.19 }} />
+          <Layer id="tariff-outlines" type="line" layout={{ visibility: layers.includes("zones") ? "visible" : "none" }} paint={{ "line-color": ZONE_COLOR, "line-width": 1.6, "line-opacity": 0.7 }} />
+        </Source>
+        <Source id="streets" type="geojson" data={data.collections.streets}>
+          <Layer id="paid-streets" type="line" layout={{ visibility: layers.includes("streets") ? "visible" : "none", "line-cap": "round" }} paint={{ "line-color": "#243f59", "line-width": ["interpolate", ["linear"], ["zoom"], 11, 2, 16, 5] }} />
+        </Source>
+        <Source id="spaces" type="geojson" data={visibleSpaces}>
+          <Layer id="paid-spaces" type="circle" layout={{ visibility: layers.includes("spaces") ? "visible" : "none" }} paint={{
+            "circle-color": ["match", ["get", "status"], "active", "#0b7272", "inactive", "#925629", "#727a84"],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2.5, 16, 5],
+            "circle-stroke-color": "#fff", "circle-stroke-width": 1,
+          }} />
+        </Source>
+        <Source id="garages" type="geojson" data={data.collections.garages}>
+          <Layer id="municipal-garages" type="circle" layout={{ visibility: layers.includes("garages") ? "visible" : "none" }} paint={{ "circle-color": "#cf652d", "circle-radius": 7, "circle-stroke-color": "#fff", "circle-stroke-width": 2.5 }} />
+        </Source>
+        <Source id="selection" type="geojson" data={selectedData}>
+          <Layer id="selected-area" type="fill" filter={["==", ["geometry-type"], "Polygon"]} paint={{ "fill-color": "#132d46", "fill-opacity": 0.09 }} />
+          <Layer id="selected-line" type="line" filter={["!=", ["geometry-type"], "Point"]} paint={{ "line-color": "#152c46", "line-width": 4, "line-dasharray": [2, 1] }} />
+          <Layer id="selected-point" type="circle" filter={["==", ["geometry-type"], "Point"]} paint={{ "circle-color": "#fff", "circle-opacity": 0, "circle-radius": 12, "circle-stroke-color": "#132d46", "circle-stroke-width": 3 }} />
+        </Source>
+      </Map>
+      {mapError && (
+        <div className="map-resource-warning" role="status">
+          <span>Some map resources could not load. Local parking search and details still work.</span>
+          <button onClick={() => { setReady(false); setMapError(false); setTileAttempt((value) => value + 1); }}>
+            <RotateCcw size={14} aria-hidden="true" /> Retry map
+          </button>
+        </div>
+      )}
+    </>
   );
+}
+
+export function ParkingMap(props: ParkingMapProps) {
+  return <MapBoundary><PortoMap {...props} /></MapBoundary>;
 }

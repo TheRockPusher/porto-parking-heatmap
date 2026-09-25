@@ -1,156 +1,120 @@
-# SF Parking Heatmap
+# Porto Parking — Supply & Tariffs
 
-[![Build](https://github.com/wolfiesch/sf-parking-heatmap/actions/workflows/build.yml/badge.svg)](https://github.com/wolfiesch/sf-parking-heatmap/actions/workflows/build.yml)
+[![Build and checks](https://github.com/TheRockPusher/porto-parking-heatmap/actions/workflows/build.yml/badge.svg)](https://github.com/TheRockPusher/porto-parking-heatmap/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A temporal heatmap of San Francisco's metered parking. Pick any day-of-week and hour, and the map shows you typical occupancy across every metered block in the city — built from ~206M meter transactions pulled directly from the SF Open Data SODA API.
+A map of Porto's published parking inventory: paid streets, limited-duration tariff zones, western-area parking spaces, and municipal garages. The repository name retains “heatmap”, but the map's colors represent **tariff categories, not parking demand**.
 
-**Live**: https://sfparking.wolfie.gg
+**This is not live availability or occupancy.** It does not predict whether a space is free, estimate a typical week, or derive occupancy from payments. No usable public citywide automobile parking history was established by the source research. See [TEMPORAL_DATA.md](TEMPORAL_DATA.md) for evidence, limitations, and potential authorized access routes.
 
-![SF Parking Heatmap](public/data/screenshot.jpg)
+## Explore the map
 
-## What it does
+- Toggle the four inventory layers and reset the view to Porto.
+- Search names in the bundled inventory, including accent-insensitive matches; this is not an address-geocoding service.
+- Select a map feature or search result to inspect its attributes, source, and reference date.
+- Compare categorical one-hour tariff references, not calculated stay totals.
+- Filter western-area space records by active, inactive, or unknown inventory status. “Active” does **not** mean currently vacant.
+- Consult the source/coverage panel and linked official parking rules before relying on the information.
 
-- **168-slot weekly profile per block**: 7 days × 24 hours of occupancy, computed from real meter sessions
-- **Multi-tier visualization**: heatmap at city zoom → 3D columns at neighborhood zoom → block-level paths and individual meter dots at street zoom
-- **Time playback**: scrub through the week or hit play to watch demand pulse
-- **Block detail panel**: per-block hour-by-hour breakdown, supply, enforcement schedule
-- **Comparison mode**: pin a reference time, see deltas vs. any other slot
-- **Search + radius**: find a specific address and see what parking looks like nearby
-- **Isochrone mode**: pick an origin and see how far you can drive/bike/walk in N minutes (uses local Valhalla routing — see Optional below)
-- **Bike share view**: overlay Bay Wheels station demand and visualize correlation with parking pressure
-- **Deeplinkable URL state**: every selection (time, view, block, search, isochrone) is in the URL, so any view is shareable
+## Run locally
 
-## Data sources
-
-All data comes from public, unauthenticated endpoints. **There are no API keys to configure.**
-
-| Source | Dataset | Used for |
-|---|---|---|
-| [SF Open Data SODA API](https://data.sfgov.org) | `8vzz-qzz9` (Parking Meters) | Active meter locations, block centroids |
-| [SF Open Data SODA API](https://data.sfgov.org) | `imvp-dq3v` (Meter Operating Schedules and Transaction Counts) | ~206M session records aggregated into 168-slot occupancy profiles |
-| [SF 311 service requests](https://data.sfgov.org) | (via SODA) | Off-hours parking pressure scores |
-| Bay Wheels GBFS | bike share station status feed | Station capacity and trip data for the bike view |
-
-The map basemap is [CARTO Dark Matter](https://carto.com/basemaps/) (open vector tiles, no token).
-
-## Tech stack
-
-- **Frontend**: Vite 7 + React 19 + TypeScript + Tailwind CSS v4
-- **Mapping**: [deck.gl](https://deck.gl) v9 layers on top of [MapLibre GL](https://maplibre.org) via `react-map-gl`
-- **Pipeline**: Python 3 standard library only — no `requirements.txt` needed
-- **Routing (optional)**: [Valhalla](https://github.com/valhalla/valhalla) running locally in Docker for isochrone computation
-
-## Setup
+Requirements: **Node.js 22**, **pnpm 10**, and a browser with WebGL support. **Python 3.10+** is needed only to refresh the data or run pipeline tests; the pipeline uses the standard library, without pip dependencies. Docker and a routing server are not required.
 
 ```bash
-# 1. Install JS deps
-pnpm install
-
-# 2. Build the data (one-time, takes a few minutes)
-pnpm fetch-meters          # ~28k metered blocks → public/data/meter_locations.json
-pnpm fetch-enforcement     # block-level enforcement schedules
-pnpm fetch-311             # 311 pressure scores
-pnpm aggregate             # paginated GROUP BY over the full transaction dataset
-
-# Or just run the whole pipeline:
-pnpm pipeline
-
-# 3. Start the dev server
-pnpm dev
+pnpm install --frozen-lockfile
+pnpm dev --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-Then open http://localhost:5173.
+Open <http://127.0.0.1:5173>. If pnpm is not installed, replace `pnpm` with `npx pnpm@10` in these commands, for example `npx pnpm@10 install --frozen-lockfile`.
+
+The committed `public/data/porto-parking.json` snapshot is enough to run or build the app. **Fetching municipal data is not a setup prerequisite.** Parking data is served from the app itself; the background tiles still need external network access.
+
+### Working on a VPS over SSH
+
+Start the loopback-bound development server above in the repository on the VPS. Keep that process running. On your own computer, open a separate terminal and forward the port:
+
+```bash
+ssh -N -L 5173:127.0.0.1:5173 work@YOUR_VPS_HOST
+```
+
+Then open <http://127.0.0.1:5173> on your computer. Replace `YOUR_VPS_HOST` and, if necessary, `work` with your SSH host/user. There is no need to expose the Vite port publicly or change the VPS firewall. Stop the tunnel and server with Ctrl+C when finished.
+
+### Build and check
+
+```bash
+pnpm lint
+python3 -m unittest discover -s scripts -p 'test_*.py'
+pnpm build
+pnpm preview --host 127.0.0.1 --port 4173 --strictPort
+```
+
+Preview is at <http://127.0.0.1:4173>; for a VPS, forward port 4173 using the same SSH pattern. `pnpm build` type-checks the frontend and writes the static site to `dist/`. Deploy that directory with a static web server; Vite preview is for checking a build, not a production server. The default build targets the site root; a subdirectory deployment requires the matching Vite `base` setting.
+
+CI installs with `pnpm install --frozen-lockfile`, runs ESLint and the Python normalization regression tests, then builds against the committed snapshot. It does not refresh municipal data or depend on live municipal endpoints.
+
+## Bundled data and refresh workflow
+
+All four layers come from the [Câmara Municipal do Porto open-data portal](https://dadosabertos.cm-porto.pt/). The source catalogs identify these datasets as **CC0**. The JSON bundle records source URLs, metadata URLs, license, reference dates, retrieval timestamps, feature counts, and coverage caveats alongside the GeoJSON collections.
+
+| Layer | Municipal dataset | Coverage and interpretation | Published reference date |
+|---|---|---|---|
+| Paid streets | [Eixos Tarifados](https://dadosabertos.cm-porto.pt/api/3/action/package_show?id=eixos-tarifados) | Street lines, not a citywide bay/meter inventory; no capacity or payment history | 2022-12-20 |
+| Tariff zones | [Zonas de Estacionamento de Duração Limitada — ZEDL](https://dadosabertos.cm-porto.pt/api/3/action/package_show?id=zonas-de-estacionamento-de-duracao-limitada-zedl) | Polygons for tariff classes I–IV, not individual spaces | 2023-03-21 |
+| Western spaces | [Lugares de Estacionamento — Zona Ocidental](https://dadosabertos.cm-porto.pt/api/3/action/package_show?id=lugares-de-estacionamento-zonas-de-estacionamento-pago-zona-ocidental) | Western-area points only, including inactive and unknown-status records; not current citywide capacity | 2022-12-15 |
+| Municipal garages | [Parques de Estacionamento Municipais](https://dadosabertos.cm-porto.pt/api/3/action/package_show?id=parques-de-estacionamento-municipais) | Facility locations and descriptive inventory, not every commercial garage or live free-space counts | 2022-12-16 |
+
+These are the published reference dates documented during source research. Consult the bundled source panel for the actual snapshot metadata. A recent retrieval time, bundle generation time, or portal migration timestamp does **not** make the underlying inventory current. Published update frequencies are not a guarantee that the geometries or attributes were recently revised.
+
+To refresh explicitly, with network access:
+
+```bash
+pnpm fetch-data
+# Equivalent entry point:
+pnpm pipeline
+# Or run without Node/pnpm:
+python3 scripts/fetch_porto_data.py
+```
+
+The script retrieves public catalog metadata and GeoJSON, checks the CC0 license, validates and normalizes all four collections, and writes `public/data/porto-parking.json`. All sources must succeed before the existing snapshot is atomically replaced; a retrieval or validation failure exits nonzero and leaves the previous bundle in place. To inspect a separate output without replacing the committed bundle, use `python3 scripts/fetch_porto_data.py --output /tmp/porto-parking.json`.
+
+Review the generated data and its source dates before committing a refreshed snapshot. Source geometries stay in WGS84; original attributes are retained with normalized values. Unknown values remain `null`, not invented zeros. Garage `lightVehicleCapacity` is a **capacity category**, not total facility capacity and never available spaces. The app loads only the bundled JSON, not municipal endpoints at page load.
+
+## Tariffs and parking rules
+
+The map presents reference **one-hour** prices: Zone I €1.20, Zone II €0.60, and Zones III/IV €0.40. Do not multiply these values to calculate a stay: official tariffs can include non-linear multi-hour or daily prices.
+
+The cited municipal guidance lists paid hours of 09:00–19:00 on weekdays in Zones I–IV, plus 11:00–16:00 on Saturdays in Zone I, excluding holidays. Maximum stays and local restrictions depend on signage. Resident permits in the authorized area and disability-badge exemptions affect payment obligations. Separate restrictions, including Movida night-time restrictions on specified streets, may apply outside paid hours: outside the payment schedule does not mean parking is unrestricted.
+
+Check current official guidance and signs on site:
+
+- [Municipal parking guidance](https://mobilidade.cm-porto.pt/estacionamento-na-via-publica/estacionamento-1)
+- [Payment and tariff information](https://mobilidade.cm-porto.pt/estacionamento-na-via-publica/pagamento-das-taxas-e-informacoes)
+- [Municipal non-resident parking information](https://portaldomunicipe.cm-porto.pt/-/estacionamento-de-n%C3%A3o-aven%C3%A7ados-1)
+
+This is an independent data exploration tool, not an official parking service or a guarantee of legal parking, current prices, or space availability.
+
+## Mapping and external services
+
+The frontend uses React 19, TypeScript, Vite 7, MapLibre GL and `react-map-gl`; the Vite configuration includes Tailwind CSS v4. Parking layers are local GeoJSON over the standard OpenStreetMap public raster basemap served from `https://tile.openstreetmap.org/{z}/{x}/{y}.png`.
+
+The background map requires external network access; tile requests go directly from the browser to OpenStreetMap's public tile service without API credentials. Browser verification discovered that the previous CARTO endpoint returned “API KEY REQUIRED” placeholder images despite successful HTTP responses, prompting the switch to the public OSM provider. This observation is not a claim that browser verification of the replacement has passed.
+
+Keep the map's linked **[© OpenStreetMap contributors](https://www.openstreetmap.org/copyright)** attribution visible. [OpenStreetMap data is licensed under the ODbL](https://www.openstreetmap.org/copyright), while use of the hosted raster tiles is governed separately by the [OSM tile usage policy](https://operations.osmfoundation.org/policies/tiles/). The public tile service has no SLA or availability guarantee: do not bulk-download or prefetch tiles, respect browser caching and the service's cache headers, and allow the browser to send its HTTP Referer rather than suppressing it. For heavier deployments, arrange a suitable tile provider or self-host instead of relying on this community-funded service.
+
+Local parking layers do not depend on municipal network access at runtime, but basemap availability and browser WebGL support affect the map experience. OSM data licensing, tile service conditions, and municipal data licensing are separate from the application's MIT license.
 
 ## Project layout
 
-```
-sf-parking-heatmap/
-├── public/data/        # Generated JSON consumed by the frontend (committed)
-│   ├── meter_locations.json
-│   ├── parking_week.json    # The 168-slot occupancy profiles (~3 MB)
-│   ├── enforcement_schedules.json
-│   ├── pressure_311.json
-│   ├── bike_week.json       # Bay Wheels demand (optional)
-│   └── isochrones/          # Pre-computed Valhalla isochrones (gitignored)
-├── scripts/            # Python data pipeline
-│   ├── fetch_meter_locations.py
-│   ├── fetch_enforcement_schedules.py
-│   ├── fetch_311_pressure.py
-│   ├── fetch_parking_supply.py
-│   ├── aggregate_parking.py        # paginated SODA GROUP BY → weekly profiles
-│   ├── compute_block_paths.py      # PCA-aligned 2-point block geometries
-│   ├── aggregate_bike_trips.py
-│   ├── build_speed_profiles.py
-│   └── compute_isochrones.py       # batch Valhalla calls
-├── src/
-│   ├── App.tsx
-│   ├── components/     # Map, panels, controls, tooltips
-│   ├── hooks/          # Data loading, time slot, URL state, isochrones
-│   ├── layers/         # deck.gl layer factories per zoom tier
-│   ├── lib/            # SODA client, color scales, geo helpers
-│   └── types.ts
-└── docker-compose.yml  # Optional Valhalla service for isochrones
-```
+- `src/` — Porto map, controls, feature details, and data loading.
+- `public/data/porto-parking.json` — committed, normalized parking snapshot.
+- `scripts/fetch_porto_data.py` — explicit municipal data refresh.
+- `scripts/test_*.py` — offline pipeline regression tests.
+- `.github/workflows/build.yml` — locked install, lint, Python tests, and build.
+- [TEMPORAL_DATA.md](TEMPORAL_DATA.md) — temporal automobile parking research and access next steps.
+- [HANDOFF.md](HANDOFF.md) — research context and project handoff.
 
-## How occupancy is computed
+## License and credits
 
-The transaction dataset (`imvp-dq3v`) gives one row per paid session with `street_block`, `session_start_dt`, etc. The pipeline:
+Application code is [MIT licensed](LICENSE). This Porto adaptation is derived from [Wolfgang Schoenberger's SF Parking Heatmap](https://github.com/wolfiesch/sf-parking-heatmap); the original copyright and license are retained. Its historical San Francisco occupancy model and routing/data pipeline are not used for Porto.
 
-1. **Aggregates server-side** with `date_extract_dow()` and `date_extract_hh()` over a 90-day window — `aggregate_parking.py` makes a few paginated GROUP BY calls instead of pulling raw rows
-2. **Maps SODA day-of-week** (1=Sun..7=Sat) **to ISO** (0=Mon..6=Sun)
-3. **Converts session counts to occupancy ratio**: `(sessions_per_week × avg_session_hours × compliance_factor) / meter_count`, clamped to `[0, 1]`
-   - `AVG_SESSION_HOURS = 1.2` (SFMTA average)
-   - `COMPLIANCE_FACTOR = 1.33` (accounts for unpaid parkers)
-4. **Blends in 311 pressure scores** for off-hours when meters aren't enforced
-
-The result is a 168-element array per block (`dow * 24 + hour`) shipped as a single JSON file.
-
-## Available scripts
-
-```bash
-pnpm dev                  # Vite dev server
-pnpm build                # Production build (tsc -b && vite build)
-pnpm lint                 # ESLint
-pnpm preview              # Preview the built bundle
-
-# Data pipeline
-pnpm fetch-meters         # Active meter locations
-pnpm fetch-enforcement    # Enforcement schedules
-pnpm fetch-311            # 311 pressure data
-pnpm fetch-supply         # Total parking spaces per block
-pnpm compute-paths        # PCA block geometry
-pnpm aggregate            # Aggregate sessions → weekly profiles
-pnpm aggregate-bikes      # Bay Wheels demand profiles
-pnpm pipeline             # Run the core pipeline end-to-end
-pnpm pipeline-full        # Core pipeline + speed profiles + isochrones
-```
-
-## Optional: isochrones
-
-The isochrone view (drive/bike/walk reachability from any point) needs a routing engine. The repo includes a `docker-compose.yml` for [Valhalla](https://github.com/valhalla/valhalla):
-
-```bash
-docker compose up -d           # Downloads CA OSM extract on first run
-pnpm build-speed-profiles      # Cluster historical speeds into 6 profiles
-pnpm compute-isochrones        # Pre-compute isochrones for the grid
-```
-
-If you don't care about isochrones, skip this — the app degrades gracefully.
-
-## Caveats
-
-- **Occupancy is an estimate.** It uses a fixed `AVG_SESSION_HOURS` and a `COMPLIANCE_FACTOR` for unpaid parkers. Both are tunable in `scripts/aggregate_parking.py`.
-- **Only metered blocks.** Non-metered streets aren't in the dataset.
-- **Typical week, not real-time.** The pipeline aggregates the trailing 90 days into a typical-week profile. There's no live feed.
-- **`enforced` mask is per-block.** During non-enforced hours the heatmap blends in 311 pressure scores rather than using meter sessions.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-## Acknowledgments
-
-- [DataSF](https://datasf.org/opendata/) for publishing the meter transaction dataset
-- [deck.gl](https://deck.gl), [MapLibre](https://maplibre.org), and [CARTO basemaps](https://carto.com/basemaps/) for the open mapping stack
-- [Valhalla](https://github.com/valhalla/valhalla) for the routing engine
+Thanks to Câmara Municipal do Porto for publishing the municipal datasets, and to MapLibre and OpenStreetMap contributors for the mapping ecosystem. Municipal CC0 data and third-party map data/services retain their own applicable licenses and conditions.

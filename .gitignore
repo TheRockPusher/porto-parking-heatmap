@@ -20,6 +20,6 @@ dist
 .vercel
 logs/
 
-# Heavy generated data (built locally; not committed)
-valhalla-data/
-public/data/isochrones/
+# Python pipeline and tests
+__pycache__/
+*.py[cod]

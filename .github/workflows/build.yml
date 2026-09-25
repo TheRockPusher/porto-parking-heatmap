@@ -1,4 +1,4 @@
-name: Build
+name: Build and checks
 
 on:
   push:
@@ -24,8 +24,19 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test data normalization
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Build
         run: pnpm build

@@ -1,437 +1,216 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
-import type { BlockData, StationData, TransportMode, ViewMode } from "./types";
-import type { ColumnStyle } from "./layers/parkingColumnLayer";
-import { useParkingData } from "./hooks/useParkingData";
-import { useTimeSlot } from "./hooks/useTimeSlot";
-import { useMapView } from "./hooks/useMapView";
-import { useViewMode } from "./hooks/useViewMode";
-import { useBikeData } from "./hooks/useBikeData";
-import { getInitialUrlState, useUrlSync } from "./hooks/useUrlState";
-import { buildNearestStationMap } from "./layers/correlationLayer";
+import { useMemo, useState } from "react";
+import { Database, ExternalLink, Info, Layers, MapPin, RotateCcw, Search, X } from "lucide-react";
 import { ParkingMap } from "./components/ParkingMap";
-import { TimeControl } from "./components/TimeControl";
-import { WeekHeatmap } from "./components/WeekHeatmap";
-import { Header } from "./components/Header";
-import { Legend } from "./components/Legend";
-import { BlockDetailPanel } from "./components/BlockDetailPanel";
-import { StationDetailPanel } from "./components/StationDetailPanel";
-import { NeighborhoodSummary } from "./components/NeighborhoodSummary";
-import { SearchBar } from "./components/SearchBar";
-import { SearchResults } from "./components/SearchResults";
-import { ComparisonControl } from "./components/ComparisonControl";
-import { IsochroneControl } from "./components/IsochroneControl";
-import { ViewModeToggle } from "./components/ViewModeToggle";
-import { useSearch } from "./hooks/useSearch";
-import { useComparison } from "./hooks/useComparison";
-import { useIsochrone } from "./hooks/useIsochrone";
-import { useIsochroneData } from "./hooks/useIsochroneData";
-import { createRadiusOverlayLayer } from "./layers/radiusOverlayLayer";
-import { createIsochroneLayers, createBlockHighlightLayer } from "./layers/isochroneLayer";
-import { IsochroneAnalysis } from "./components/IsochroneAnalysis";
+import { FeatureDetails } from "./components/FeatureDetails";
+import { SourcePanel } from "./components/SourcePanel";
+import { useParkingData } from "./hooks/useParkingData";
+import { useUrlState } from "./hooks/useUrlState";
+import {
+  DEFAULT_STATE, FEATURE_LABELS, LAYER_KINDS, LAYER_LABELS, SPACE_STATUSES,
+  STATUS_LABELS, ZONE_COLORS, featureName, formatDate, formatRate, normalizeSearch,
+} from "./lib/parking";
+import type { LayerKind, ParkingFeature, SpaceStatus } from "./types";
 
-/** Human-readable labels for speed profile indices */
-const PROFILE_LABELS: Record<number, string> = {
-  0: "AM Peak (7-10 AM)",
-  1: "Midday (10 AM-4 PM)",
-  2: "PM Peak (4-8 PM)",
-  3: "Night (8 PM-7 AM)",
-  4: "Weekend Day (8 AM-8 PM)",
-  5: "Weekend Night (8 PM-8 AM)",
-};
-
-// Parse URL state once at module level (before first render)
-const urlInit = getInitialUrlState();
+const RULES_URL = "https://mobilidade.cm-porto.pt/estacionamento-na-via-publica/estacionamento-1";
+const TARIFF_URL = "https://mobilidade.cm-porto.pt/estacionamento-na-via-publica/pagamento-das-taxas-e-informacoes";
 
 function App() {
-  const { blocks, cityAverages, cityEnforcedFraction, loading, error, generated, dateRange } = useParkingData();
-  const { timeSlot, isPlaying, speed, setDow, setHour, setSlot, setSpeed, togglePlay } =
-    useTimeSlot(urlInit.timeSlot);
-  const { viewState, onViewStateChange, flyTo } = useMapView(urlInit.viewState);
-  const [selectedBlock, setSelectedBlock] = useState<BlockData | null>(null);
-  const [selectedStation, setSelectedStation] = useState<StationData | null>(null);
-  const [columnStyle, setColumnStyle] = useState<ColumnStyle>("columns");
-  const { mode: viewMode, setMode: setViewMode } = useViewMode(
-    (urlInit.viewMode as ViewMode) ?? "parking",
-  );
-  const bikeData = useBikeData();
-  const search = useSearch(blocks, timeSlot);
-  const comparison = useComparison(urlInit.comparing, urlInit.refDow, urlInit.refHour);
-  const isochrone = useIsochrone({
-    initialActive: urlInit.isoActive,
-    initialMode: (urlInit.isoMode as TransportMode) ?? undefined,
-    initialMaxMinutes: urlInit.isoMaxMinutes ?? undefined,
-  });
-  const isoData = useIsochroneData();
-  const [snapDistance, setSnapDistance] = useState<number | null>(null);
+  const { data, loading, error, retry } = useParkingData();
+  const [state, setState] = useUrlState();
+  const [query, setQuery] = useState("");
+  const [searchKind, setSearchKind] = useState<LayerKind | "all">("all");
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [resetKey, setResetKey] = useState(0);
 
-  // Load bike data when switching to bike or correlation mode
-  const loadBikeData = bikeData.load;
-  useEffect(() => {
-    if (viewMode === "bike" || viewMode === "correlation") {
-      loadBikeData();
-    }
-  }, [viewMode, loadBikeData]);
-
-  // Pre-compute nearest station map for correlation layer (once, when both datasets loaded)
-  const nearestStations = useMemo(() => {
-    if (blocks.length === 0 || bikeData.stations.length === 0) return new Map<string, StationData[]>();
-    return buildNearestStationMap(blocks, bikeData.stations);
-  }, [blocks, bikeData.stations]);
-
-  // Resolve station ID from URL once bike data loads
-  useEffect(() => {
-    if (urlInit.stationId && bikeData.stations.length > 0 && !selectedStation) {
-      const found = bikeData.stations.find((s) => s.id === urlInit.stationId);
-      if (found) setSelectedStation(found);
-    }
-  }, [bikeData.stations, selectedStation]);
-
-  // Resolve block ID from URL once data loads
-  const pendingBlockId = useMemo(() => urlInit.blockId ?? null, []);
-  useEffect(() => {
-    if (pendingBlockId && blocks.length > 0 && !selectedBlock) {
-      const found = blocks.find((b) => b.id === pendingBlockId);
-      if (found) setSelectedBlock(found);
-    }
-  }, [blocks, pendingBlockId, selectedBlock]);
-
-  // Load isochrone data when mode becomes active
-  const { loadMode, getGrid, getIsochrones: getIso, getProfileIndex: getProfile } = isoData;
-  const { isActive: isoActive, mode: isoMode, setOrigin: isoSetOrigin, origin: isoOrigin } = isochrone;
-
-  useEffect(() => {
-    if (isoActive) {
-      loadMode(isoMode);
-    }
-  }, [isoActive, isoMode, loadMode]);
-
-  // Restore isochrone origin from URL once data loads
-  useEffect(() => {
-    if (urlInit.isoLat != null && urlInit.isoLng != null && !isoOrigin) {
-      const grid = getGrid(isoMode);
-      if (grid) {
-        isoSetOrigin(urlInit.isoLat, urlInit.isoLng, grid);
-      }
-    }
-  }, [getGrid, isoMode, isoOrigin, isoSetOrigin]);
-
-  // Sync state to URL
-  useUrlSync({
-    timeSlot,
-    viewState,
-    selectedBlockId: selectedBlock?.id ?? null,
-    isPlaying,
-    searchLat: search.selectedResult?.lat,
-    searchLng: search.selectedResult?.lng,
-    searchRadius: search.selectedResult ? search.radius : undefined,
-    comparing: comparison.comparing,
-    refDow: comparison.referenceSlot?.dow,
-    refHour: comparison.referenceSlot?.hour,
-    isoActive: isochrone.isActive,
-    isoMode: isochrone.mode,
-    isoLat: isochrone.origin?.lat,
-    isoLng: isochrone.origin?.lng,
-    isoMaxMinutes: isochrone.isActive ? isochrone.maxMinutes : undefined,
-    viewMode,
-    selectedStationId: selectedStation?.id ?? null,
-  });
-
-  // Handle browser back/forward
-  useEffect(() => {
-    function handleUrlChange() {
-      const s = getInitialUrlState();
-      if (s.timeSlot) setSlot(s.timeSlot.dow, s.timeSlot.hour);
-      if (s.blockId && blocks.length > 0) {
-        const found = blocks.find((b) => b.id === s.blockId);
-        if (found) setSelectedBlock(found);
-      } else if (!s.blockId) {
-        setSelectedBlock(null);
-      }
-      if (s.viewMode) {
-        setViewMode(s.viewMode as ViewMode);
-      }
-    }
-    window.addEventListener("urlstatechange", handleUrlChange);
-    return () => window.removeEventListener("urlstatechange", handleUrlChange);
-  }, [blocks, setSlot, setViewMode]);
-
-  const handleBlockClick = useCallback(
-    (block: BlockData | null) => {
-      setSelectedBlock(block);
-      if (block) {
-        flyTo(block.lng, block.lat);
-      }
-    },
-    [flyTo],
-  );
-
-  const handleStationClick = useCallback(
-    (station: StationData | null) => {
-      setSelectedStation(station);
-      if (station) {
-        flyTo(station.lng, station.lat);
-      }
-    },
-    [flyTo],
-  );
-
-  const handleViewModeChange = useCallback(
-    (mode: ViewMode) => {
-      setViewMode(mode);
-      // Clear selections when switching modes
-      if (mode === "parking") {
-        setSelectedStation(null);
-      } else {
-        setSelectedBlock(null);
-      }
-    },
-    [setViewMode],
-  );
-
-  // Handle isochrone map click: snap to nearest grid point
-  const handleMapClick = useCallback(
-    (coordinate: [number, number]) => {
-      if (!isoActive) return;
-      const grid = getGrid(isoMode);
-      if (!grid) return;
-      // coordinate is [lng, lat]
-      const dist = isoSetOrigin(coordinate[1], coordinate[0], grid);
-      setSnapDistance(dist ?? null);
-    },
-    [isoActive, isoMode, isoSetOrigin, getGrid],
-  );
-
-  // Handle search result selection: fly to location
-  const handleSearchSelect = useCallback(
-    (result: { lat: number; lng: number; name: string; type: string }) => {
-      search.selectResult(result);
-      flyTo(result.lng, result.lat, 15);
-    },
-    [search, flyTo],
-  );
-
-  // Build extra layers for search radius + isochrones
-  const profileIndex = useMemo(
-    () => getProfile(isoMode, timeSlot.dow, timeSlot.hour),
-    [getProfile, isoMode, timeSlot.dow, timeSlot.hour],
-  );
-
-  const currentContours = useMemo(() => {
-    if (!isoActive || !isoOrigin) return null;
-    return getIso(isoMode, isoOrigin.id, profileIndex);
-  }, [isoActive, isoOrigin, isoMode, profileIndex, getIso]);
-
-  // Quantize zoom to a boolean tier so isochrone layers don't rebuild on every zoom frame
-  const isoZoomMajorOnly = viewState.zoom < 12;
-
-  const isochroneContourLayers = useMemo(() => {
-    if (!isoActive || !isoOrigin || !currentContours) return [];
-    return createIsochroneLayers(
-      currentContours, isoMode, isochrone.maxMinutes, isoOrigin, isoZoomMajorOnly ? 11 : 13,
+  const features = useMemo(() => {
+    const records: ParkingFeature[] = [];
+    if (data) for (const kind of LAYER_KINDS) records.push(...data.collections[kind].features);
+    return records;
+  }, [data]);
+  const featureIndex = useMemo(() => new Map(features.map((feature) => [feature.properties.id, feature])), [features]);
+  const searchIndex = useMemo(() => features.map((feature) => ({
+    feature,
+    text: normalizeSearch([
+      feature.properties.name,
+      FEATURE_LABELS[feature.properties.kind],
+      feature.properties.id,
+      feature.properties.kind === "garages" ? feature.properties.address : "",
+    ].filter(Boolean).join(" ")),
+  })), [features]);
+  const searchTerm = normalizeSearch(query);
+  const browsing = searchTerm.length > 0 || searchKind !== "all";
+  const results = useMemo(() => {
+    if (!browsing) return [];
+    const words = searchTerm.split(/\s+/).filter(Boolean);
+    return searchIndex.filter(({ feature, text }) =>
+      (searchKind === "all" || feature.properties.kind === searchKind) && words.every((word) => text.includes(word)),
+    ).map(({ feature }) => feature).sort((a, b) =>
+      Number(b.properties.kind === "garages") - Number(a.properties.kind === "garages") ||
+      featureName(a).localeCompare(featureName(b), "pt") || a.properties.id.localeCompare(b.properties.id),
     );
-  }, [isoActive, isoOrigin, isoMode, isochrone.maxMinutes, currentContours, isoZoomMajorOnly]);
+  }, [browsing, searchIndex, searchKind, searchTerm]);
+  const selected = state.selectedId ? featureIndex.get(state.selectedId) ?? null : null;
+  const selectedVisible = selected && state.layers.includes(selected.properties.kind) &&
+    (selected.properties.kind !== "spaces" || state.statuses.includes(selected.properties.status));
+  const statusCounts = useMemo(() => {
+    const counts: Record<SpaceStatus, number> = { active: 0, inactive: 0, unknown: 0 };
+    data?.collections.spaces.features.forEach((feature) => { counts[feature.properties.status] += 1; });
+    return counts;
+  }, [data]);
+  const tariffs = useMemo(() => {
+    const rates = new Map<string, number | null>();
+    data?.collections.zones.features.forEach((feature) => rates.set(feature.properties.zone, feature.properties.hourlyRate));
+    const order = ["I", "II", "III", "IV"];
+    return Array.from(rates).sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
+  }, [data]);
 
-  // Block highlights are expensive (point-in-polygon per block) - separate memo, no zoom dep.
-  // Hidden at heatmap zoom since individual blocks aren't visible there anyway.
-  const isochroneHighlightLayer = useMemo(() => {
-    if (!isoActive || !isoOrigin || !currentContours || isoZoomMajorOnly) return null;
-    return createBlockHighlightLayer(blocks, currentContours, isochrone.maxMinutes);
-  }, [isoActive, isoOrigin, currentContours, isochrone.maxMinutes, blocks, isoZoomMajorOnly]);
+  function selectFeature(id: string) {
+    const feature = featureIndex.get(id);
+    if (!feature) return;
+    const properties = feature.properties;
+    setState((previous) => ({
+      ...previous,
+      selectedId: id,
+      layers: previous.layers.includes(properties.kind) ? previous.layers : [...previous.layers, properties.kind],
+      statuses: properties.kind === "spaces" && !previous.statuses.includes(properties.status)
+        ? [...previous.statuses, properties.status] : previous.statuses,
+    }));
+  }
 
-  const isochroneExtraLayers = useMemo(() => {
-    const layers = [...isochroneContourLayers];
-    if (isochroneHighlightLayer) layers.push(isochroneHighlightLayer);
-    return layers;
-  }, [isochroneContourLayers, isochroneHighlightLayer]);
+  function toggleLayer(kind: LayerKind) {
+    setState((previous) => ({
+      ...previous,
+      layers: previous.layers.includes(kind) ? previous.layers.filter((layer) => layer !== kind) : [...previous.layers, kind],
+    }));
+  }
 
-  const searchExtraLayers = useMemo(() => {
-    if (!search.selectedResult) return [];
-    return [createRadiusOverlayLayer(
-      { lat: search.selectedResult.lat, lng: search.selectedResult.lng },
-      search.radius,
-    )];
-  }, [search.selectedResult, search.radius]);
-
-  const extraLayers = useMemo(
-    () => [...searchExtraLayers, ...isochroneExtraLayers],
-    [searchExtraLayers, isochroneExtraLayers],
-  );
-
-  const handleWeekCellClick = useCallback(
-    (dow: number, hour: number) => {
-      setSlot(dow, hour);
-    },
-    [setSlot],
-  );
-
-  if (error) {
-    return (
-      <div className="h-screen w-screen flex items-center justify-center bg-gray-950">
-        <div className="text-center">
-          <p className="text-red-400 text-lg mb-2">Failed to load parking data</p>
-          <p className="text-gray-500 text-sm">{error}</p>
-          <p className="text-gray-600 text-xs mt-4">
-            Run <code className="bg-gray-800 px-1.5 py-0.5 rounded">python3 scripts/aggregate_parking.py</code> to generate data
-          </p>
-        </div>
-      </div>
-    );
+  function reset() {
+    setState(DEFAULT_STATE);
+    setQuery("");
+    setSearchKind("all");
+    setResetKey((value) => value + 1);
   }
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-gray-950">
-      {/* Loading overlay */}
-      {loading && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-gray-950">
-          <div className="text-center">
-            <h1 className="text-2xl font-semibold mb-2">
-              SF Parking <span className="font-light text-gray-400">Heatmap</span>
-            </h1>
-            <p className="text-gray-500 text-sm">Loading parking data...</p>
-          </div>
+    <div className="app-shell">
+      <a className="skip-link" href="#explorer">Skip to parking explorer</a>
+      <header className="app-header">
+        <div className="brand">
+          <div className="brand-mark" aria-hidden="true"><MapPin size={26} /></div>
+          <div><span className="eyebrow">Porto · Portugal</span><h1>Parking atlas</h1></div>
         </div>
-      )}
-
-      {/* Map */}
-      <ParkingMap
-        blocks={blocks}
-        timeSlot={timeSlot}
-        selectedBlockId={selectedBlock?.id ?? null}
-        viewState={viewState}
-        onViewStateChange={onViewStateChange}
-        onBlockClick={handleBlockClick}
-        onMapClick={isochrone.isActive ? handleMapClick : undefined}
-        extraLayers={extraLayers}
-        comparing={comparison.comparing}
-        referenceSlot={comparison.referenceSlot}
-        columnStyle={columnStyle}
-        viewMode={viewMode}
-        stations={bikeData.stations}
-        selectedStationId={selectedStation?.id ?? null}
-        onStationClick={handleStationClick}
-        nearestStations={nearestStations}
-      />
-
-      {/* Search */}
-      <SearchBar
-        query={search.query}
-        results={search.results}
-        isSearching={search.isSearching}
-        radius={search.radius}
-        hasSelection={search.selectedResult !== null}
-        onQueryChange={search.setQuery}
-        onSelectResult={handleSearchSelect}
-        onClear={search.clearSearch}
-        onRadiusChange={search.setRadius}
-      />
-
-      {/* Isochrone control */}
-      <IsochroneControl
-        isActive={isochrone.isActive}
-        origin={isochrone.origin}
-        mode={isochrone.mode}
-        maxMinutes={isochrone.maxMinutes}
-        loading={isoData.loading}
-        snapDistance={snapDistance}
-        profileName={PROFILE_LABELS[profileIndex] ?? null}
-        onToggleActive={isochrone.toggleActive}
-        onModeChange={isochrone.setMode}
-        onMaxMinutesChange={isochrone.setMaxMinutes}
-        onClearOrigin={isochrone.clearOrigin}
-      >
-        {isochrone.origin && currentContours && (
-          <IsochroneAnalysis
-            blocks={blocks}
-            timeSlot={timeSlot}
-            contours={currentContours}
-            maxMinutes={isochrone.maxMinutes}
-            origin={isochrone.origin}
-          />
-        )}
-      </IsochroneControl>
-
-      {/* Nearby blocks panel */}
-      {search.selectedResult && (
-        <SearchResults
-          blocks={search.nearbyBlocks}
-          timeSlot={timeSlot}
-          onBlockClick={handleBlockClick}
-        />
-      )}
-
-      {/* UI overlays */}
-      <Header
-        generated={viewMode === "bike" ? bikeData.generated : generated}
-        dateRange={viewMode === "bike" ? bikeData.dateRange : dateRange}
-        blockCount={viewMode === "bike" ? bikeData.stations.length : blocks.length}
-      />
-
-      {/* View mode toggle */}
-      <div className="absolute top-16 left-4 z-20">
-        <ViewModeToggle mode={viewMode} onModeChange={handleViewModeChange} />
+        <p className="header-description">A map of supply & tariffs.<br /><span>Explore the records, not a prediction.</span></p>
+        <div className="header-actions">
+          <button className="button" aria-label="Reset view" onClick={reset}><RotateCcw size={16} aria-hidden="true" /><span>Reset view</span></button>
+          <button className="button button-primary" disabled={!data} onClick={() => setSourcesOpen(true)}><Database size={16} aria-hidden="true" /><span>Sources & dates</span></button>
+        </div>
+      </header>
+      <div className="availability-notice">
+        <Info size={18} aria-hidden="true" />
+        <p><strong>Not live availability or occupancy.</strong> Historical inventory and tariff references — no free-space counts, demand estimates or “best time to park”.</p>
       </div>
+      <main className="workspace">
+        <aside className="explorer" id="explorer" aria-label="Parking explorer" tabIndex={-1}>
+          <section className="search-section" aria-labelledby="search-heading">
+            <span className="eyebrow">Explore the city</span>
+            <h2 id="search-heading">Find a place to understand</h2>
+            <div className="search-input">
+              <Search size={18} aria-hidden="true" />
+              <label className="sr-only" htmlFor="parking-search">Search parking records</label>
+              <input id="parking-search" type="search" value={query} disabled={!data} placeholder="Try Trindade or Boavista" onChange={(event) => setQuery(event.target.value)} aria-describedby="search-help" />
+              {query && <button className="icon-button" onClick={() => setQuery("")} aria-label="Clear search"><X size={16} aria-hidden="true" /></button>}
+            </div>
+            <div className="search-scope">
+              <label htmlFor="search-kind">Browse</label>
+              <select id="search-kind" value={searchKind} disabled={!data} onChange={(event) => setSearchKind(event.target.value as LayerKind | "all")}>
+                <option value="all">All record types</option>
+                {LAYER_KINDS.map((kind) => <option key={kind} value={kind}>{LAYER_LABELS[kind]}</option>)}
+              </select>
+            </div>
+            <p id="search-help" className="helper-text">Local records, with or without accents. Search includes hidden layers and statuses; selecting a result reveals it.</p>
+            {browsing && data && <div className="search-results">
+              <p className="result-count" role="status">{results.length.toLocaleString("en-GB")} matching {results.length === 1 ? "record" : "records"}{results.length > 30 ? " · first 30 shown" : ""}</p>
+              {results.length === 0 ? <p className="empty-search">No matching records. Try a street or garage name, or change the record type. This is not an address geocoder.</p> :
+                <ul aria-label="Parking search results">{results.slice(0, 30).map((feature) => (
+                  <li key={feature.properties.id}>
+                    <button className={selected?.properties.id === feature.properties.id ? "result-button selected" : "result-button"} onClick={() => selectFeature(feature.properties.id)} aria-pressed={selected?.properties.id === feature.properties.id}>
+                      <span className={`result-dot dot-${feature.properties.kind}`} aria-hidden="true" />
+                      <span><strong>{featureName(feature)}</strong><small>{FEATURE_LABELS[feature.properties.kind]} · {feature.properties.id}{feature.properties.kind === "spaces" ? ` · ${STATUS_LABELS[feature.properties.status]}` : ""}</small></span>
+                    </button>
+                  </li>
+                ))}</ul>}
+              {results.length > 30 && <p className="helper-text">Refine your search to find other records.</p>}
+            </div>}
+          </section>
 
-      {!isochrone.isActive && viewMode === "parking" && (
-        <NeighborhoodSummary blocks={blocks} timeSlot={timeSlot} />
-      )}
+          {selected && <>
+            {!selectedVisible && <p className="hidden-selection">This record is hidden by a map filter. <button onClick={() => selectFeature(selected.properties.id)}>Show it on the map</button></p>}
+            <FeatureDetails feature={selected} source={data?.sources.find((source) => source.id === selected.properties.sourceId)} onClose={() => setState((previous) => ({ ...previous, selectedId: null }))} />
+          </>}
+          {data && state.selectedId && !selected && <p className="hidden-selection">The shared record is not in this snapshot. <button onClick={() => setState((previous) => ({ ...previous, selectedId: null }))}>Clear selection</button></p>}
 
-      <WeekHeatmap
-        cityAverages={cityAverages}
-        cityEnforcedFraction={cityEnforcedFraction}
-        timeSlot={timeSlot}
-        onCellClick={handleWeekCellClick}
-        viewMode={viewMode}
-        bikeCityAverages={bikeData.cityAverages}
-      />
+          <section className="layers-section" aria-labelledby="layers-heading">
+            <div className="section-heading"><h2 id="layers-heading"><Layers size={17} aria-hidden="true" /> Map layers</h2><span className="quiet-label">Snapshot records</span></div>
+            <fieldset className="layer-controls" disabled={!data}>
+              <legend className="sr-only">Visible map layers</legend>
+              {LAYER_KINDS.map((kind) => (
+                <label className="layer-option" key={kind}>
+                  <input type="checkbox" checked={state.layers.includes(kind)} onChange={() => toggleLayer(kind)} />
+                  <span className={`layer-symbol symbol-${kind}`} aria-hidden="true" />
+                  <span>{LAYER_LABELS[kind]}<small>{kind === "spaces" ? "Western area only" : kind === "streets" ? "Paid road segments, not capacity" : kind === "garages" ? "Facilities, not free-space counts" : "One-hour price references"}</small></span>
+                  <span className="layer-count">{data?.collections[kind].features.length.toLocaleString("en-GB") ?? "—"}</span>
+                </label>
+              ))}
+            </fieldset>
+            <fieldset className="status-controls" disabled={!data}>
+              <legend>Western space inventory status</legend>
+              <div className="status-options">{SPACE_STATUSES.map((status) => (
+                <label key={status}>
+                  <input type="checkbox" checked={state.statuses.includes(status)} onChange={() => setState((previous) => ({ ...previous, statuses: previous.statuses.includes(status) ? previous.statuses.filter((item) => item !== status) : [...previous.statuses, status] }))} />
+                  <span className={`status-dot status-${status}`} aria-hidden="true" />
+                  <span>{STATUS_LABELS[status]}<small>{data ? statusCounts[status].toLocaleString("en-GB") : "—"}</small></span>
+                </label>
+              ))}</div>
+              <p className="helper-text">“Active” does not mean vacant. {state.layers.includes("spaces") ? `${state.statuses.reduce((sum, status) => sum + statusCounts[status], 0).toLocaleString("en-GB")} space records shown.` : "Enable Western paid spaces to see these records."}</p>
+            </fieldset>
+          </section>
 
-      <Legend
-        is3D={viewState.zoom >= 13 && viewState.zoom < 15.5}
-        comparing={comparison.comparing}
-        columnStyle={columnStyle}
-        onColumnStyleChange={setColumnStyle}
-        isochroneActive={isochrone.isActive && isochrone.origin !== null}
-        isochroneMode={isochrone.mode}
-        viewMode={viewMode}
-      />
+          <section className="tariff-legend" aria-labelledby="tariff-heading">
+            <div className="section-heading"><h2 id="tariff-heading">Tariff classes</h2><span className="quiet-label">One hour · EUR</span></div>
+            <div className="tariff-items">{tariffs.map(([zone, rate]) => (
+              <div key={zone}><span className="zone-swatch" style={{ backgroundColor: ZONE_COLORS[zone] ?? "#667085" }} aria-hidden="true" /><span>Zone {zone}</span><strong>{formatRate(rate)}</strong></div>
+            ))}</div>
+            <p className="helper-text">Colors identify tariff classes, never demand or availability. Source references are historical; longer stays are not a simple hourly multiplication.</p>
+          </section>
 
-      {/* Comparison note: zoom in for delta view when at heatmap level */}
-      {comparison.comparing && viewState.zoom < 13 && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-lg bg-purple-500/20 border border-purple-500/30 text-[11px] text-purple-300">
-          Zoom in to see delta visualization
-        </div>
-      )}
+          <details className="rules-section">
+            <summary>Parking rules & important exceptions</summary>
+            <div className="rules-content">
+              <h3>Check the signs before you park</h3>
+              <p>Official municipal guidance lists paid hours for zones I–IV as weekdays 09:00–19:00; Zone I also Saturday 11:00–16:00. Public holidays are excluded.</p>
+              <p>Maximum stays depend on signage (generally 2–10 hours). Longer-duration prices are not always linear: the published Zone II tariff includes €2.00 for four hours and €3.60 for a day.</p>
+              <p>Resident permits apply only in the authorized area. Disability-badge exemptions and their conditions also matter. These records do not determine your eligibility.</p>
+              <p>Movida restrictions apply on specified streets on Friday, Saturday and holiday eves, 20:00–08:00. Outside paid hours does not mean unrestricted parking.</p>
+              <a href={RULES_URL} target="_blank" rel="noreferrer">Official hours & rules <ExternalLink size={13} aria-hidden="true" /></a>
+              <a href={TARIFF_URL} target="_blank" rel="noreferrer">Official payment & tariff information <ExternalLink size={13} aria-hidden="true" /></a>
+            </div>
+          </details>
+          <footer className="explorer-footer">
+            <p>Municipal open data, carefully separated from live conditions.</p>
+            {data && <p>Snapshot assembled {formatDate(data.generatedAt)}. <button onClick={() => setSourcesOpen(true)}>See source reference dates</button>.</p>}
+          </footer>
+        </aside>
 
-      <TimeControl
-        timeSlot={timeSlot}
-        isPlaying={isPlaying}
-        speed={speed}
-        onDowChange={setDow}
-        onHourChange={setHour}
-        onTogglePlay={togglePlay}
-        onSpeedChange={setSpeed}
-      >
-        <ComparisonControl
-          comparing={comparison.comparing}
-          referenceSlot={comparison.referenceSlot}
-          currentSlot={timeSlot}
-          onPin={() => comparison.pinReference(timeSlot)}
-          onExit={comparison.exitComparison}
-        />
-      </TimeControl>
-
-      {/* Detail panels */}
-      <BlockDetailPanel
-        block={viewMode === "parking" || viewMode === "correlation" ? selectedBlock : null}
-        timeSlot={timeSlot}
-        onClose={() => setSelectedBlock(null)}
-        comparing={comparison.comparing}
-        referenceSlot={comparison.referenceSlot}
-      />
-      <StationDetailPanel
-        station={viewMode === "bike" ? selectedStation : null}
-        timeSlot={timeSlot}
-        onClose={() => setSelectedStation(null)}
-      />
+        <section className="map-panel" aria-label="Porto parking map">
+          <div className="map-heading"><span className="map-location"><MapPin size={15} aria-hidden="true" /> Porto</span><span>Supply & tariff geography</span></div>
+          {data && <ParkingMap data={data} layers={state.layers} statuses={state.statuses} selected={selectedVisible ? selected : null} resetKey={resetKey} onSelect={selectFeature} />}
+          {loading && <div className="map-message" role="status"><span className="loading-spinner" /><h2>Loading Porto’s parking records</h2><p>Opening the bundled municipal snapshot. No live availability is requested.</p></div>}
+          {error && <div className="map-message error-message" role="alert"><Database size={32} aria-hidden="true" /><h2>Parking data could not load</h2><p>{error}</p><p>Check your connection and retry. If this persists, the site’s bundled snapshot may be missing or invalid.</p><button className="button button-primary" onClick={retry}><RotateCcw size={16} aria-hidden="true" /> Retry parking data</button></div>}
+          {data && !state.layers.length && <p className="map-empty-notice">All parking layers are hidden. Enable a layer in the explorer.</p>}
+          {data && <div className="map-caption"><span>Click a feature to inspect its record</span><strong>Inventory ≠ availability</strong></div>}
+        </section>
+      </main>
+      {data && <SourcePanel data={data} open={sourcesOpen} onClose={() => setSourcesOpen(false)} />}
     </div>
   );
 }

@@ -1,117 +1,72 @@
-import type { MapViewState } from "deck.gl";
+import type { Feature, FeatureCollection, Geometry } from "geojson";
 
-/** A metered block with its centroid and typical-week occupancy profile */
-export interface BlockData {
+export type LayerKind = "streets" | "zones" | "spaces" | "garages";
+export type SpaceStatus = "active" | "inactive" | "unknown";
+
+interface BaseProperties {
   id: string;
-  lat: number;
-  lng: number;
-  meters: number;
-  street: string;
-  hood: string;
-  /** 168-element array indexed as (dow * 24 + hour), dow: 0=Mon..6=Sun (ISO) */
-  slots: number[];
-  /** 168-element array of 0/1 indicating meter enforcement per slot */
-  enforced?: number[];
-  /** Total parking spaces on this block (from supply data) */
-  supply?: number;
-  /** Grid-snapped 2-point path [[lng, lat], [lng, lat]] for PathLayer rendering */
-  path?: [number, number][];
-  /** Original individual meter positions [[lng, lat], ...] for deep-zoom dots */
-  meterPositions?: [number, number][];
+  name: string | null;
+  sourceId: LayerKind;
+  attributes: Record<string, unknown>;
 }
 
-/** Pre-computed parking data loaded from parking_week.json */
-export interface ParkingWeekData {
-  generated: string;
-  dateRange: { from: string; to: string };
-  blocks: BlockData[];
+export interface StreetProperties extends BaseProperties {
+  kind: "streets";
 }
 
-/** Current time selection for the heatmap */
-export interface TimeSlot {
-  /** Day of week: 0=Monday through 6=Sunday (ISO 8601) */
-  dow: number;
-  /** Hour: 0-23 */
-  hour: number;
+export interface ZoneProperties extends BaseProperties {
+  kind: "zones";
+  zone: string;
+  hourlyRate: number | null;
 }
 
-/** Block detail from on-demand SODA query */
-export interface BlockDetail {
-  blockId: string;
-  street: string;
-  meters: number;
-  /** Full 168-slot profile */
-  slots: number[];
-  /** Raw session counts per slot (for display) */
-  sessionCounts: number[];
-  /** 168-element enforcement mask from parent block */
-  enforced?: number[];
+export interface SpaceProperties extends BaseProperties {
+  kind: "spaces";
+  status: SpaceStatus;
+  residentZone: string | null;
 }
 
-/** Playback state */
-export interface PlaybackState {
-  isPlaying: boolean;
-  speed: number; // ms per step
+export interface GarageProperties extends BaseProperties {
+  kind: "garages";
+  address: string | null;
+  operator: string | null;
+  openingHours: string | null;
+  lightVehicleCapacity: number | null;
 }
 
-/** Transport modes for isochrone visualization */
-export type TransportMode = "driving" | "cycling" | "walking";
+export type ParkingProperties =
+  | StreetProperties
+  | ZoneProperties
+  | SpaceProperties
+  | GarageProperties;
+export type ParkingFeature = Feature<Geometry, ParkingProperties>;
 
-/** A grid point used as an isochrone origin */
-export interface IsochroneOrigin {
-  id: number;
-  lat: number;
-  lng: number;
-}
-
-/** GeoJSON polygon contour for a single time threshold */
-export interface IsochroneContour {
-  minutes: number;
-  geometry: GeoJSON.Polygon | GeoJSON.MultiPolygon;
-}
-
-/** Isochrone data for one grid point across all speed profiles */
-export interface IsochroneSet {
-  grid: IsochroneOrigin[];
-  profileMap: number[]; // 168 entries: slot index -> profile index (0-5)
-  isochrones: Record<
-    string, // grid point ID
-    Record<
-      string, // profile index
-      Record<string, GeoJSON.Feature> // minutes -> GeoJSON Feature
-    >
-  >;
-}
-
-/** Isochrone interaction state */
-export interface IsochroneState {
-  isActive: boolean;
-  origin: IsochroneOrigin | null;
-  mode: TransportMode;
-  maxMinutes: number; // max travel time to show (2-20, controls how many bands visible)
-}
-
-/** Bay Wheels bike share station with typical-week demand profile */
-export interface StationData {
-  id: string;
+export interface ParkingSource {
+  id: LayerKind;
   name: string;
-  lat: number;
-  lng: number;
-  capacity: number;
-  /** 168-element departure demand array (0-1, peak=1.0), indexed as (dow * 24 + hour) */
-  slots: number[];
-  /** 168-element arrival demand array (0-1, peak=1.0) */
-  arrivals: number[];
+  url: string;
+  metadataUrl: string;
+  license: string;
+  referenceDate: string;
+  retrievedAt: string;
+  featureCount: number;
+  caveat: string;
 }
 
-/** Pre-computed bike share data loaded from bike_week.json */
-export interface BikeWeekData {
-  generated: string;
-  dateRange: { from: string; to: string };
-  stations: StationData[];
+export interface ParkingData {
+  schemaVersion: 1;
+  generatedAt: string;
+  sources: ParkingSource[];
+  collections: {
+    streets: FeatureCollection<Geometry, StreetProperties>;
+    zones: FeatureCollection<Geometry, ZoneProperties>;
+    spaces: FeatureCollection<Geometry, SpaceProperties>;
+    garages: FeatureCollection<Geometry, GarageProperties>;
+  };
 }
 
-/** Active visualization mode */
-export type ViewMode = "parking" | "bike" | "correlation";
-
-export type { MapViewState };
+export interface ExplorerState {
+  layers: LayerKind[];
+  statuses: SpaceStatus[];
+  selectedId: string | null;
+}

@@ -1,96 +1,55 @@
-import { useState, useEffect, useMemo } from "react";
-import type { BlockData, ParkingWeekData, TimeSlot } from "../types";
-import { computeAllCityAverages, getTimeSlotIndex } from "../lib/occupancy";
-
-/** Compute fraction of blocks enforced per slot (168 values, 0-1) */
-function computeEnforcedFraction(blocks: BlockData[]): Float32Array {
-  const fracs = new Float32Array(168);
-  if (blocks.length === 0) return fracs;
-  for (let i = 0; i < 168; i++) {
-    let enforced = 0;
-    for (const block of blocks) {
-      if (!block.enforced || block.enforced[i] === 1) enforced++;
-    }
-    fracs[i] = enforced / blocks.length;
-  }
-  return fracs;
-}
-
-interface ParkingDataState {
-  blocks: BlockData[];
-  cityAverages: Float32Array;
-  cityEnforcedFraction: Float32Array;
-  loading: boolean;
-  error: string | null;
-  generated: string | null;
-  dateRange: { from: string; to: string } | null;
-}
+import { useCallback, useEffect, useState } from "react";
+import type { ParkingData } from "../types";
 
 export function useParkingData() {
-  const [state, setState] = useState<ParkingDataState>({
-    blocks: [],
-    cityAverages: new Float32Array(168),
-    cityEnforcedFraction: new Float32Array(168).fill(1),
-    loading: true,
-    error: null,
-    generated: null,
-    dateRange: null,
-  });
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<{
+    data: ParkingData | null;
+    loading: boolean;
+    error: string | null;
+  }>({ data: null, loading: true, error: null });
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
 
     async function load() {
       try {
-        const res = await fetch("/data/parking_week.json");
-        if (!res.ok) throw new Error(`Failed to load parking data: ${res.status}`);
-
-        const data: ParkingWeekData = await res.json();
-
-        if (cancelled) return;
-
-        const cityAverages = computeAllCityAverages(data.blocks);
-        const cityEnforcedFraction = computeEnforcedFraction(data.blocks);
-
-        setState({
-          blocks: data.blocks,
-          cityAverages,
-          cityEnforcedFraction,
-          loading: false,
-          error: null,
-          generated: data.generated,
-          dateRange: data.dateRange,
-        });
-      } catch (err) {
-        if (cancelled) return;
-        setState((prev) => ({
-          ...prev,
-          loading: false,
-          error: err instanceof Error ? err.message : "Unknown error",
-        }));
+        const response = await fetch(
+          `${import.meta.env.BASE_URL}data/porto-parking.json`,
+          { signal: controller.signal },
+        );
+        if (!response.ok) throw new Error(`Snapshot request returned HTTP ${response.status}.`);
+        const data: ParkingData = await response.json();
+        if (
+          data.schemaVersion !== 1 ||
+          !Array.isArray(data.sources) ||
+          !["streets", "zones", "spaces", "garages"].every((kind) => {
+            const collection = data.collections?.[kind as keyof ParkingData["collections"]];
+            return collection?.type === "FeatureCollection" && Array.isArray(collection.features);
+          })
+        ) {
+          throw new Error("The parking snapshot has an unsupported format.");
+        }
+        if (!controller.signal.aborted) setState({ data, loading: false, error: null });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setState({
+            data: null,
+            loading: false,
+            error: error instanceof Error ? error.message : "The parking snapshot could not be read.",
+          });
+        }
       }
     }
 
-    load();
-    return () => { cancelled = true; };
+    void load();
+    return () => controller.abort();
+  }, [attempt]);
+
+  const retry = useCallback(() => {
+    setState({ data: null, loading: true, error: null });
+    setAttempt((value) => value + 1);
   }, []);
 
-  const neighborhoods = useMemo(() => {
-    const set = new Set<string>();
-    for (const block of state.blocks) {
-      // Extract neighborhood from street name if available
-      if (block.street) set.add(block.street);
-    }
-    return Array.from(set).sort();
-  }, [state.blocks]);
-
-  const getCityAverage = (slot: TimeSlot): number => {
-    return state.cityAverages[getTimeSlotIndex(slot.dow, slot.hour)];
-  };
-
-  return {
-    ...state,
-    neighborhoods,
-    getCityAverage,
-  };
+  return { ...state, retry };
 }
