@@ -23,3 +23,6 @@ logs/
 # Python pipeline and tests
 __pycache__/
 *.py[cod]
+
+# Raw upstream response cache for the data pipeline
+.cache/

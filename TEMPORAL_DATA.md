@@ -15,6 +15,16 @@ There are concrete public leads, including evidence beyond the earlier HANDOFF:
 
 Keep the product labelled **parking supply/tariff information, not live occupancy/availability**. Do not extrapolate automobile demand from micromobility, taxi ranks, payment revenue, static capacity, or old example observations.
 
+## Update 2026-09-29: the app's pressure index is not temporal data
+
+The application now publishes an **estimated relative parking pressure index** on a 150 m hexagonal grid, for two periods (weekday daytime, overnight). It is derived entirely from **static open data**: INE Censos 2021 households, OpenStreetMap roads/POIs/car parks, and the PDM 2021 figure of 64,680 public on-street spaces distributed by road length. It ranks cells by *estimated demand versus estimated supply* within Porto.
+
+- It contains **no observation with a timestamp**, no sessions and no garage counts. It does **not** satisfy the section 4 acceptance contract for temporal occupancy (no `observed_at`/session times, no 90-day history, no channel coverage, no dataset-specific reuse rights for observations) and **must not be presented as occupancy, availability, paid demand or a prediction**.
+- Its two periods are modelling assumptions, not measured hours. A cell's index says how it compares with other cells, not how full it is at any time.
+- ReportaPorto complaint counts and municipal restriction records are displayed for context only and do not enter the index. Complaints do not measure parking demand or illegal parking prevalence.
+- The decision above stands: no feed met the section 4 gates, and this update adds none. If real temporal data is obtained, it should be evaluated against section 4 and shown as a separate, labelled layer; it should not be blended into the index without a documented method.
+- Additional access routes identified on 2026-09-29 (EPorto concession monitoring platform, Porto Digital QuantumLeap history, LADA/CADA procedure) are recorded as addenda in section 5 and in the section 6 next actions. They are leads, not data in hand.
+
 ## 1. Current CKAN inventory and resources
 
 ### Scope actually checked
@@ -197,12 +207,42 @@ Agradeço a indicação do interlocutor técnico e das condições para obter es
 
 Com os melhores cumprimentos.
 
+### Addenda (2026-09-29) — NOT SENT
+
+These additions leave Drafts A and B unchanged. They can be appended to the matching draft or sent as separate requests. Like the drafts, they contain no invented sender identity.
+
+**Addendum A1 — EPorto: monitoring-platform history (append to Draft A).**  
+Source: the concession tender file <https://mobilidade.cm-porto.pt/files/uploads/cms/1614600090-HTRAU2FobH.pdf> (procedure CLPQI/1/2014/DMC) quotes Art. 7.º, n.º 2 of Anexo II (Código de Exploração): the concessionaire maintains a meter-centralisation system and an internet platform giving the municipality real-time access to, at minimum, data including “receita momentânea” (b) and “taxa ou índice de ocupação financeira” (g). **Caveat:** the wording appears inside a bidder's clarification request from the 2014 procedure. The final contract text, whether the two requirements were dispensed, whether the current platform provides these items, and whether it retains history are **not verified**.
+
+> Adicionalmente, o artigo 7.º, n.º 2 do Anexo II (Código de Exploração) da concessão de estacionamento pago na via pública prevê uma plataforma de monitorização acessível ao Município. Solicito informação sobre os dados que essa plataforma efetivamente disponibiliza (incluindo receita e taxa ou índice de ocupação financeira), o seu nível de agregação (parquímetro, troço, zona; intervalo horário ou outro), o histórico conservado e respetivas datas de início/fim, e se é possível facultar uma exportação anonimizada e agregada desse histórico, com dicionário de dados e as condições de reutilização. Solicito ainda a indicação da entidade responsável por essa plataforma e do contrato ou aditamento vigente.
+
+**Addendum C — Porto Digital / Município: QuantumLeap history export.**  
+**Para:** dados@cm-porto.pt (the recipient at Porto Digital is not verified here; the sender should ask the municipal open-data team to forward the request or identify the contact).  
+**Evidence:** the public broker `https://broker.fiware.urbanplatform.portodigital.pt/v2/subscriptions` lists a subscription with id starting `63ac28ec`, described “OffStreetParking for QuantumLeap prod”, with 93,872 notifications, last on 2026-04-01. [INFERENCE] This indicates a QuantumLeap time-series store fed with garage entities; its content, retention, access route and rights are unknown, and only the anonymous subscription listing was read.  
+**Assunto:** Pedido de exportação do histórico de estacionamento em parques (QuantumLeap) e condições de reutilização
+
+> Exmos. Senhores,
+>
+> A lista pública de subscrições da plataforma urbana (`/v2/subscriptions`) mostra uma subscrição “OffStreetParking for QuantumLeap prod”, com 93 872 notificações, a última em 2026-04-01. Pergunto se existe um histórico de entidades `OffStreetParking` armazenado, e solicito, se possível, uma exportação do mesmo, com: identificador estável do parque, data/hora da observação e da ingestão com fuso explícito, contagens de lugares ocupados/livres, capacidade aplicável, estado de qualidade ou encerramento, e datas de início/fim com lacunas conhecidas. Solicito também a indicação da origem das observações (parque e operador), o dicionário de dados, a política de retenção e a licença ou autorização escrita para análise e publicação de indicadores derivados. Não são necessários dados pessoais. Se a exportação não for possível, agradeço a indicação da entidade competente ou o procedimento adequado, incluindo pedido formal ao abrigo da Lei n.º 26/2016.
+>
+> Com os melhores cumprimentos.
+
+**Playbook — formal access and reuse requests under Lei 26/2016 (LADA).** Use when an informal request (Drafts A, B, C) is unanswered, refused or partly answered. Deadlines below are as summarised in the 2026-09-29 investigation; the sender should confirm the current statute text before relying on them.
+
+1. **Access request.** Send a written request to each entity (municipality, EPorto, STCP Serviços) naming the documents/data wanted (for example the monitoring-platform export or occupancy statistics that operators must report under the municipal code article D-3/58.º), stating that no personal data is requested, and quoting Lei 26/2016.
+2. **Reply time.** The entity should reply within **10 days**. The period can be extended by up to **2 months**; expect a notice explaining the extension.
+3. **Escalation.** If the request is ignored, refused or only partly met, a complaint to **CADA** (Comissão de Acesso aos Documentos Administrativos) can be filed within **20 days**; confirm in the statute from which event that period runs. Keep the request, the acknowledgement and any reply.
+4. **Reuse is separate from access.** Obtaining a document does not license republication of derived maps. Request a **reuse licence** under **arts. 21–23** of Lei 26/2016, specifying purpose (analysis and publication of aggregated indicators), attribution and any conditions.
+5. **Record.** Log dates sent/received, references, entity and outcome in the repository; do not commit personal data or third-party documents without a licence.
+
+Timing lead: the **PMUS public consultation** runs until **2026-11-04**; a comment asking for publication of parking-demand and occupancy data would be on the public record.
+
 ## 6. Bounded outcome and handoff
 
 - **Observed and accessible:** 69-package CKAN catalog; two static parking DATEX publications; public broker garage/street entities; STCP panel announcement; two SABA pages with automobile free-space displays.
 - **Timestamped automobile observation found:** exactly one in the inspected broker garage snapshot, dated **2020-08-07**. Its historical authenticity/completeness and reuse rights remain unverified; it fails current-availability and profile requirements.
 - **Not established:** usable hourly/daily automobile history, current citywide street sessions, an authorized/licensed current automobile observation stream, documented panel feed endpoint, observation freshness of SABA/taxi displays, or collection/retention rights for those displays.
 - **Rights established only for the relevant catalogued open-data resources:** CC0 inventory and the explicitly two-wheel sharing dataset. Do not extend those rights to other feeds by hostname or schema similarity.
-- **Next access action:** the real sender can send Draft A and Draft B and evaluate the response against section 4. Neither draft has been sent. SABA general contact is available for a rights/referral request, but no separate message was sent or invented.
+- **Next access action:** the real sender can send Draft A and Draft B and evaluate the response against section 4. Neither draft has been sent. SABA general contact is available for a rights/referral request, but no separate message was sent or invented. Added 2026-09-29 (also unsent): Addendum A1 (EPorto monitoring-platform history), Addendum C (QuantumLeap export) and the Lei 26/2016 playbook; the 2025 STCP Serviços report (2,974 street spaces, 652,210 street transactions) gives annual totals only and cannot meet section 4.
 
 Verification here consisted of the actual public GET responses, response schemas/counts, full street-entity pagination, source-page HTML and the linked SABA legal PDF. No application builds, tests, lint, formatting or ingestion were run for this research deliverable. The findings do not cover private feeds, contractual datasets, every operator in Porto, every possible broker tenant, or unlinked historical services.

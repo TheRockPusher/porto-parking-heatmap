@@ -1,11 +1,21 @@
-import type { ExplorerState, LayerKind, ParkingFeature, SpaceStatus } from "../types";
+import type { ExplorerState, LayerKind, MapLayer, ParkingFeature, PressurePeriod, SpaceStatus } from "../types";
 
 export const LAYER_KINDS: LayerKind[] = ["zones", "streets", "spaces", "garages"];
+export const MAP_LAYERS: MapLayer[] = ["pressure", "zones", "streets", "spaces", "garages"];
 export const SPACE_STATUSES: SpaceStatus[] = ["active", "inactive", "unknown"];
+export const PERIODS: PressurePeriod[] = ["daytime", "overnight"];
 export const DEFAULT_STATE: ExplorerState = {
-  layers: ["zones", "streets", "garages"],
+  layers: ["pressure", "streets", "garages"],
   statuses: ["active"],
+  period: "daytime",
   selectedId: null,
+};
+export const MAP_LAYER_LABELS: Record<MapLayer, string> = {
+  pressure: "Parking pressure (estimated)",
+  zones: "Tariff zones",
+  streets: "Paid streets",
+  spaces: "Western paid spaces",
+  garages: "Municipal garages",
 };
 export const LAYER_LABELS: Record<LayerKind, string> = {
   zones: "Tariff zones",

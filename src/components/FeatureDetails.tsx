@@ -1,17 +1,29 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ExternalLink, X } from "lucide-react";
 import { FEATURE_LABELS, STATUS_LABELS, featureName, formatDate, formatRate } from "../lib/parking";
-import type { ParkingFeature, ParkingSource } from "../types";
+import type { AttributeTable, LayerKind, ParkingFeature, SourceRecord } from "../types";
 
 interface FeatureDetailsProps {
   feature: ParkingFeature;
-  source: ParkingSource | undefined;
+  source: SourceRecord | undefined;
+  loadAttributes: (kind: LayerKind) => Promise<AttributeTable>;
   onClose: () => void;
 }
 
-export function FeatureDetails({ feature, source, onClose }: FeatureDetailsProps) {
+interface AttributeResult {
+  kind: LayerKind;
+  attempt: number;
+  table: AttributeTable | null;
+  message: string | null;
+}
+
+export function FeatureDetails({ feature, source, loadAttributes, onClose }: FeatureDetailsProps) {
   const heading = useRef<HTMLHeadingElement>(null);
   const properties = feature.properties;
+  const kind = properties.kind;
+  const [attributesOpen, setAttributesOpen] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [result, setResult] = useState<AttributeResult | null>(null);
 
   useEffect(() => {
     heading.current?.focus({ preventScroll: true });
@@ -20,6 +32,19 @@ export function FeatureDetails({ feature, source, onClose }: FeatureDetailsProps
       heading.current?.scrollIntoView({ behavior: reducedMotion ? "instant" : "smooth", block: "start" });
     }
   }, [properties.id]);
+
+  useEffect(() => {
+    if (!attributesOpen) return;
+    let current = true;
+    loadAttributes(kind).then(
+      (table) => { if (current) setResult({ kind, attempt, table, message: null }); },
+      (reason: unknown) => { if (current) setResult({ kind, attempt, table: null, message: reason instanceof Error ? reason.message : "Unknown error" }); },
+    );
+    return () => { current = false; };
+  }, [attributesOpen, kind, attempt, loadAttributes]);
+
+  const settled = result && result.kind === kind && result.attempt === attempt ? result : null;
+  const rawAttributes = settled?.table?.[properties.id];
 
   return (
     <section className="feature-details" aria-labelledby="feature-heading">
@@ -53,19 +78,28 @@ export function FeatureDetails({ feature, source, onClose }: FeatureDetailsProps
         <h3>Record provenance</h3>
         <p>{source.name}</p>
         <dl>
-          <div><dt>Source reference</dt><dd>{formatDate(source.referenceDate)}</dd></div>
+          <div><dt>Source reference</dt><dd>{source.referenceDate ? formatDate(source.referenceDate) : "Not provided"}</dd></div>
           <div><dt>Retrieved</dt><dd>{formatDate(source.retrievedAt)}</dd></div>
           <div><dt>License</dt><dd>{source.license}</dd></div>
         </dl>
         <p className="small-text">{source.caveat}</p>
-        <a href={source.metadataUrl} target="_blank" rel="noreferrer">Official metadata <ExternalLink size={13} aria-hidden="true" /></a>
+        {source.metadataUrl && <a href={source.metadataUrl} target="_blank" rel="noreferrer">Official metadata <ExternalLink size={13} aria-hidden="true" /></a>}
         <a href={source.url} target="_blank" rel="noreferrer">Source GeoJSON <ExternalLink size={13} aria-hidden="true" /></a>
       </div>}
-      <details className="raw-attributes">
+      <details className="raw-attributes" onToggle={(event) => setAttributesOpen(event.currentTarget.open)}>
         <summary>Original source attributes</summary>
-        <dl>{Object.entries(properties.attributes).map(([key, value]) => (
-          <div key={key}><dt>{key}</dt><dd>{value === null ? "Not provided" : typeof value === "object" ? JSON.stringify(value) : String(value)}</dd></div>
-        ))}</dl>
+        {attributesOpen && !settled && <p className="attributes-status" role="status">Loading original attributes…</p>}
+        {settled?.message && (
+          <p className="attributes-status attributes-error" role="alert">
+            Original attributes could not load ({settled.message}).{" "}
+            <button onClick={() => setAttempt((value) => value + 1)}>Retry</button>
+          </p>
+        )}
+        {settled?.table && (rawAttributes
+          ? <dl>{Object.entries(rawAttributes).map(([key, value]) => (
+            <div key={key}><dt>{key}</dt><dd>{value === null ? "Not provided" : typeof value === "object" ? JSON.stringify(value) : String(value)}</dd></div>
+          ))}</dl>
+          : <p className="attributes-status">No original attributes are stored for this record.</p>)}
       </details>
     </section>
   );
