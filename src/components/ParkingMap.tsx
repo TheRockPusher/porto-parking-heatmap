@@ -3,10 +3,11 @@ import type { ReactNode } from "react";
 import { Map, Source, Layer, NavigationControl, ScaleControl } from "react-map-gl/maplibre";
 import type { MapRef } from "react-map-gl/maplibre";
 import type { ExpressionSpecification, StyleSpecification } from "maplibre-gl";
-import type { Geometry } from "geojson";
+import type { Feature, FeatureCollection, Geometry, Polygon } from "geojson";
 import { RotateCcw } from "lucide-react";
-import { ZONE_COLORS } from "../lib/parking";
-import type { LayerKind, ParkingData, ParkingFeature, SpaceStatus } from "../types";
+import { ZONE_COLORS, LAYER_KINDS } from "../lib/parking";
+import { NO_DATA_COLOR, PRESSURE_STOPS, periodIndexProperty } from "../lib/pressure";
+import type { MapLayer, ParkingCollections, PressureCellProperties, PressurePeriod, SpaceStatus } from "../types";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 const PORTO_VIEW = { longitude: -8.635, latitude: 41.157, zoom: 12.7, bearing: 0, pitch: 0 };
@@ -31,9 +32,20 @@ const ZONE_COLOR: ExpressionSpecification = [
   "I", ZONE_COLORS.I, "II", ZONE_COLORS.II,
   "III", ZONE_COLORS.III, "IV", ZONE_COLORS.IV, "#667085",
 ];
-const INTERACTIVE_LAYERS: Record<LayerKind, string> = {
-  zones: "tariff-zones", streets: "paid-streets", spaces: "paid-spaces", garages: "municipal-garages",
+const INTERACTIVE_LAYERS: Record<MapLayer, string> = {
+  pressure: "pressure-cells", zones: "tariff-zones", streets: "paid-streets", spaces: "paid-spaces", garages: "municipal-garages",
 };
+const EMPTY_PRESSURE: FeatureCollection<Polygon, PressureCellProperties> = { type: "FeatureCollection", features: [] };
+
+function pressureColor(period: PressurePeriod): ExpressionSpecification {
+  const property = periodIndexProperty(period);
+  const [base, ...steps] = PRESSURE_STOPS;
+  return [
+    "case",
+    ["==", ["get", property], null], NO_DATA_COLOR,
+    ["step", ["get", property], base[1], ...steps.flatMap(([value, color]) => [value, color])],
+  ] as ExpressionSpecification;
+}
 
 function geometryBounds(geometry: Geometry): [[number, number], [number, number]] {
   const bounds: [[number, number], [number, number]] = [[Infinity, Infinity], [-Infinity, -Infinity]];
@@ -57,10 +69,12 @@ function geometryBounds(geometry: Geometry): [[number, number], [number, number]
 }
 
 interface ParkingMapProps {
-  data: ParkingData;
-  layers: LayerKind[];
+  collections: Partial<ParkingCollections>;
+  pressureGeoJSON: FeatureCollection<Polygon, PressureCellProperties> | null;
+  period: PressurePeriod;
+  layers: MapLayer[];
   statuses: SpaceStatus[];
-  selected: ParkingFeature | null;
+  selected: Feature<Geometry, { id: string }> | null;
   resetKey: number;
   onSelect: (id: string) => void;
 }
@@ -86,20 +100,29 @@ class MapBoundary extends Component<{ children: ReactNode }, { failed: boolean }
   }
 }
 
-function PortoMap({ data, layers, statuses, selected, resetKey, onSelect }: ParkingMapProps) {
+function PortoMap({ collections, pressureGeoJSON, period, layers, statuses, selected, resetKey, onSelect }: ParkingMapProps) {
   const map = useRef<MapRef>(null);
   const [ready, setReady] = useState(false);
   const [mapError, setMapError] = useState(false);
   const [hovering, setHovering] = useState(false);
   const [tileAttempt, setTileAttempt] = useState(0);
-  const visibleSpaces = useMemo(() => ({
-    ...data.collections.spaces,
-    features: data.collections.spaces.features.filter((feature) => statuses.includes(feature.properties.status)),
-  }), [data, statuses]);
+  const { zones, streets, spaces, garages } = collections;
+  const visibleSpaces = useMemo(() => spaces && ({
+    ...spaces,
+    features: spaces.features.filter((feature) => statuses.includes(feature.properties.status)),
+  }), [spaces, statuses]);
   const selectedData = useMemo(() => ({
     type: "FeatureCollection" as const,
     features: selected ? [selected] : [],
   }), [selected]);
+  const pressurePaint = useMemo(() => pressureColor(period), [period]);
+  // Layers of a late-arriving inventory source are added on top of the selection highlight;
+  // remounting the selection source whenever the loaded set changes keeps it above them.
+  const loadedSignature = LAYER_KINDS.filter((kind) => collections[kind]).join(",");
+  const interactiveLayerIds = [
+    ...(layers.includes("pressure") && pressureGeoJSON ? [INTERACTIVE_LAYERS.pressure] : []),
+    ...LAYER_KINDS.filter((kind) => layers.includes(kind) && collections[kind]).map((kind) => INTERACTIVE_LAYERS[kind]),
+  ];
 
   useEffect(() => {
     if (ready) map.current?.jumpTo(PORTO_VIEW);
@@ -127,7 +150,7 @@ function PortoMap({ data, layers, statuses, selected, resetKey, onSelect }: Park
         dragRotate={false}
         touchPitch={false}
         attributionControl={{ compact: false }}
-        interactiveLayerIds={layers.map((kind) => INTERACTIVE_LAYERS[kind])}
+        interactiveLayerIds={interactiveLayerIds}
         cursor={hovering ? "pointer" : "grab"}
         onLoad={() => setReady(true)}
         onError={() => setMapError(true)}
@@ -140,24 +163,36 @@ function PortoMap({ data, layers, statuses, selected, resetKey, onSelect }: Park
       >
         <NavigationControl position="top-right" showCompass={false} />
         <ScaleControl position="bottom-left" unit="metric" />
-        <Source id="zones" type="geojson" data={data.collections.zones}>
-          <Layer id="tariff-zones" type="fill" layout={{ visibility: layers.includes("zones") ? "visible" : "none" }} paint={{ "fill-color": ZONE_COLOR, "fill-opacity": 0.19 }} />
-          <Layer id="tariff-outlines" type="line" layout={{ visibility: layers.includes("zones") ? "visible" : "none" }} paint={{ "line-color": ZONE_COLOR, "line-width": 1.6, "line-opacity": 0.7 }} />
+        <Source id="pressure" type="geojson" data={pressureGeoJSON ?? EMPTY_PRESSURE}>
+          <Layer id="pressure-cells" type="fill" layout={{ visibility: layers.includes("pressure") ? "visible" : "none" }} paint={{ "fill-color": pressurePaint, "fill-opacity": 0.55 }} />
+          <Layer id="pressure-outlines" type="line" layout={{ visibility: layers.includes("pressure") ? "visible" : "none" }} paint={{ "line-color": "#ffffff", "line-width": 0.6, "line-opacity": 0.6 }} />
         </Source>
-        <Source id="streets" type="geojson" data={data.collections.streets}>
-          <Layer id="paid-streets" type="line" layout={{ visibility: layers.includes("streets") ? "visible" : "none", "line-cap": "round" }} paint={{ "line-color": "#243f59", "line-width": ["interpolate", ["linear"], ["zoom"], 11, 2, 16, 5] }} />
-        </Source>
-        <Source id="spaces" type="geojson" data={visibleSpaces}>
-          <Layer id="paid-spaces" type="circle" layout={{ visibility: layers.includes("spaces") ? "visible" : "none" }} paint={{
-            "circle-color": ["match", ["get", "status"], "active", "#0b7272", "inactive", "#925629", "#727a84"],
-            "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2.5, 16, 5],
-            "circle-stroke-color": "#fff", "circle-stroke-width": 1,
-          }} />
-        </Source>
-        <Source id="garages" type="geojson" data={data.collections.garages}>
-          <Layer id="municipal-garages" type="circle" layout={{ visibility: layers.includes("garages") ? "visible" : "none" }} paint={{ "circle-color": "#cf652d", "circle-radius": 7, "circle-stroke-color": "#fff", "circle-stroke-width": 2.5 }} />
-        </Source>
-        <Source id="selection" type="geojson" data={selectedData}>
+        {zones && (
+          <Source id="zones" type="geojson" data={zones}>
+            <Layer id="tariff-zones" type="fill" layout={{ visibility: layers.includes("zones") ? "visible" : "none" }} paint={{ "fill-color": ZONE_COLOR, "fill-opacity": 0.19 }} />
+            <Layer id="tariff-outlines" type="line" layout={{ visibility: layers.includes("zones") ? "visible" : "none" }} paint={{ "line-color": ZONE_COLOR, "line-width": 1.6, "line-opacity": 0.7 }} />
+          </Source>
+        )}
+        {streets && (
+          <Source id="streets" type="geojson" data={streets}>
+            <Layer id="paid-streets" type="line" layout={{ visibility: layers.includes("streets") ? "visible" : "none", "line-cap": "round" }} paint={{ "line-color": "#243f59", "line-width": ["interpolate", ["linear"], ["zoom"], 11, 2, 16, 5] }} />
+          </Source>
+        )}
+        {visibleSpaces && (
+          <Source id="spaces" type="geojson" data={visibleSpaces}>
+            <Layer id="paid-spaces" type="circle" layout={{ visibility: layers.includes("spaces") ? "visible" : "none" }} paint={{
+              "circle-color": ["match", ["get", "status"], "active", "#0b7272", "inactive", "#925629", "#727a84"],
+              "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2.5, 16, 5],
+              "circle-stroke-color": "#fff", "circle-stroke-width": 1,
+            }} />
+          </Source>
+        )}
+        {garages && (
+          <Source id="garages" type="geojson" data={garages}>
+            <Layer id="municipal-garages" type="circle" layout={{ visibility: layers.includes("garages") ? "visible" : "none" }} paint={{ "circle-color": "#cf652d", "circle-radius": 7, "circle-stroke-color": "#fff", "circle-stroke-width": 2.5 }} />
+          </Source>
+        )}
+        <Source key={loadedSignature} id="selection" type="geojson" data={selectedData}>
           <Layer id="selected-area" type="fill" filter={["==", ["geometry-type"], "Polygon"]} paint={{ "fill-color": "#132d46", "fill-opacity": 0.09 }} />
           <Layer id="selected-line" type="line" filter={["!=", ["geometry-type"], "Point"]} paint={{ "line-color": "#152c46", "line-width": 4, "line-dasharray": [2, 1] }} />
           <Layer id="selected-point" type="circle" filter={["==", ["geometry-type"], "Point"]} paint={{ "circle-color": "#fff", "circle-opacity": 0, "circle-radius": 12, "circle-stroke-color": "#132d46", "circle-stroke-width": 3 }} />

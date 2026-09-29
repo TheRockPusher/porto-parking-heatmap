@@ -1,28 +1,18 @@
-#!/usr/bin/env python3
-"""Fetch Porto's public CC0 parking inventory, never occupancy or availability.
+"""Porto's public CC0 parking inventory (streets, zones, spaces, garages).
 
-Python 3.10+, standard library only. Run from any directory:
-    python3 scripts/fetch_porto_data.py [--output PATH]
-
-Known public resource URLs come from HANDOFF.md. Each refresh verifies CKAN's
-license and resource reference date, validates all four layers, then atomically
-replaces the snapshot. Retrieval dates are not observation/reference dates.
+Inventory and tariffs only, never occupancy or availability. Each source's CKAN
+license and resource reference date are verified, every feature is validated,
+then compact features (rendering/search properties) and lazily loaded raw
+attribute tables are produced separately.
 """
 
-import argparse
-from datetime import date, datetime, timezone
-import json
+from datetime import date
 import math
-import os
-from pathlib import Path
-import sys
-import tempfile
-import urllib.error
-import urllib.request
+
+from .common import DataError, Fetcher, round_coords, utc_now
 
 
 BASE_URL = "https://dadosabertos.cm-porto.pt"
-DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "public/data/porto-parking.json"
 # A generous Porto-area sanity envelope, NOT a municipal-boundary spatial join.
 PORTO_BOUNDS = (-8.72, 41.12, -8.54, 41.20)
 SOURCES = (
@@ -60,7 +50,7 @@ SOURCES = (
         "dataset": "5ea79d81-9e19-11f1-84ed-6abdb6d5cf34",
         "resource": "7364670a-1fa0-4189-9729-5d314f8701f1",
         "filename": "ext-parques-de-estacionamento-municipais-geojson.geojson",
-        "caveat": "Historical municipal facility inventory. Light-vehicle capacity is one source category, not total capacity or free spaces; other categories and missing values remain in attributes. Operators and hours may have changed. No live availability or occupancy.",
+        "caveat": "Historical municipal facility inventory. Light-vehicle capacity is one source category, not total capacity or free spaces; other categories and missing values remain in the original attributes. Operators and hours may have changed. No live availability or occupancy.",
     },
 )
 GEOMETRY_TYPES = {
@@ -71,35 +61,12 @@ GEOMETRY_TYPES = {
 }
 
 
-class DataError(ValueError):
-    """An upstream source cannot safely become a published snapshot."""
-
-
-def utc_now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def source_urls(spec):
+    """(download URL, CKAN package_show URL)."""
     return (
         f"{BASE_URL}/dataset/{spec['dataset']}/resource/{spec['resource']}/download/{spec['filename']}",
         f"{BASE_URL}/api/3/action/package_show?id={spec['slug']}",
     )
-
-
-def reject_constant(value):
-    raise DataError(f"Non-finite JSON number: {value}")
-
-
-def fetch_json(url):
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json", "User-Agent": "porto-parking-inventory/1"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            return json.loads(response.read().decode("utf-8-sig"), parse_constant=reject_constant)
-    except (urllib.error.URLError, OSError, UnicodeError, ValueError) as exc:
-        raise DataError(f"Cannot retrieve valid JSON from {url}: {exc}") from exc
 
 
 def reference_date(metadata, spec):
@@ -143,53 +110,109 @@ def nonnegative_number(value, field, integer=False):
     return int(value) if integer else value
 
 
+# Geometry validation -------------------------------------------------------
+
+def _position(value):
+    if not isinstance(value, list) or len(value) not in (2, 3):
+        raise DataError("A coordinate must contain longitude, latitude and optional altitude")
+    if any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) for n in value):
+        raise DataError("Coordinates must be finite WGS84 numbers")
+    west, south, east, north = PORTO_BOUNDS
+    if not west <= value[0] <= east or not south <= value[1] <= north:
+        raise DataError(f"Coordinate outside Porto-area WGS84 bounds: {value}")
+
+
+def _sequence(value, minimum, validator):
+    if not isinstance(value, list) or len(value) < minimum:
+        raise DataError(f"Geometry coordinate sequence needs at least {minimum} entries")
+    for item in value:
+        validator(item)
+
+
+def _line(value):
+    _sequence(value, 2, _position)
+
+
+def _ring(value):
+    _sequence(value, 4, _position)
+    if value[0] != value[-1]:
+        raise DataError("Polygon ring must be closed")
+    if len({tuple(p[:2]) for p in value[:-1]}) < 3:
+        raise DataError("Polygon ring needs at least three distinct positions")
+
+
+def _polygon(value):
+    _sequence(value, 1, _ring)
+
+
 def validate_geometry(geometry, kind):
     if not isinstance(geometry, dict) or geometry.get("type") not in GEOMETRY_TYPES[kind]:
         raise DataError(f"{kind} geometry must be one of {sorted(GEOMETRY_TYPES[kind])}")
-
-    def position(value):
-        if not isinstance(value, list) or len(value) not in (2, 3):
-            raise DataError("A coordinate must contain longitude, latitude and optional altitude")
-        if any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) for n in value):
-            raise DataError("Coordinates must be finite WGS84 numbers")
-        west, south, east, north = PORTO_BOUNDS
-        if not west <= value[0] <= east or not south <= value[1] <= north:
-            raise DataError(f"Coordinate outside Porto-area WGS84 bounds: {value}")
-
-    def sequence(value, minimum, validator):
-        if not isinstance(value, list) or len(value) < minimum:
-            raise DataError(f"Geometry coordinate sequence needs at least {minimum} entries")
-        for item in value:
-            validator(item)
-
-    def line(value):
-        sequence(value, 2, position)
-
-    def ring(value):
-        sequence(value, 4, position)
-        if value[0] != value[-1]:
-            raise DataError("Polygon ring must be closed")
-        if len({tuple(p[:2]) for p in value[:-1]}) < 3:
-            raise DataError("Polygon ring needs at least three distinct positions")
-
-    def polygon(value):
-        sequence(value, 1, ring)
-
     coordinates = geometry.get("coordinates")
     geometry_type = geometry["type"]
     if geometry_type == "Point":
-        position(coordinates)
+        _position(coordinates)
     elif geometry_type == "LineString":
-        line(coordinates)
+        _line(coordinates)
     elif geometry_type == "MultiLineString":
-        sequence(coordinates, 1, line)
+        _sequence(coordinates, 1, _line)
     elif geometry_type == "Polygon":
-        polygon(coordinates)
+        _polygon(coordinates)
     else:
-        sequence(coordinates, 1, polygon)
+        _sequence(coordinates, 1, _polygon)
 
+
+# Geometry compaction (post-validation) --------------------------------------
+
+def _is_valid(validator, value):
+    try:
+        validator(value)
+    except DataError:
+        return False
+    return True
+
+
+def _dedupe(positions):
+    result = []
+    for position in positions:
+        if not result or position != result[-1]:
+            result.append(position)
+    return result
+
+
+def _compact_sequence(original, validator):
+    """Round to 6 dp and drop consecutive duplicates, but only while the sequence stays valid.
+
+    Falls back to rounded-only, then to the untouched source coordinates, so
+    compaction can never turn a valid source geometry into an invalid one.
+    """
+    rounded = round_coords(original)
+    for candidate in (_dedupe(rounded), rounded):
+        if _is_valid(validator, candidate):
+            return candidate
+    return original
+
+
+def compact_geometry(geometry):
+    geometry_type = geometry["type"]
+    coordinates = geometry["coordinates"]
+    if geometry_type == "Point":
+        compacted = round_coords(coordinates)
+    elif geometry_type == "LineString":
+        compacted = _compact_sequence(coordinates, _line)
+    elif geometry_type == "MultiLineString":
+        compacted = [_compact_sequence(line, _line) for line in coordinates]
+    elif geometry_type == "Polygon":
+        compacted = [_compact_sequence(ring, _ring) for ring in coordinates]
+    else:
+        compacted = [[_compact_sequence(ring, _ring) for ring in polygon] for polygon in coordinates]
+    return {"type": geometry_type, "coordinates": compacted}
+
+
+# Feature normalization ---------------------------------------------------------
 
 def normalize_feature(feature, kind):
+    """Return (compact Feature, original attributes) for one validated source feature."""
     if not isinstance(feature, dict) or feature.get("type") != "Feature":
         raise DataError("Expected a GeoJSON Feature")
     attrs = feature.get("properties")
@@ -201,7 +224,7 @@ def normalize_feature(feature, kind):
     identifier = f"{kind}:{object_id}"
     geometry = feature.get("geometry")
     validate_geometry(geometry, kind)
-    props = {"id": identifier, "kind": kind, "sourceId": kind, "attributes": attrs}
+    props = {"id": identifier, "kind": kind}
     if kind in ("streets", "spaces"):
         props["name"] = nullable_text(attrs.get("toponimo"), "toponimo")
     if kind == "streets":
@@ -236,10 +259,11 @@ def normalize_feature(feature, kind):
             openingHours=nullable_text(attrs.get("horario_funcionamento"), "horario_funcionamento"),
             lightVehicleCapacity=nonnegative_number(attrs.get("nº_lugares_ligeiros"), "nº_lugares_ligeiros", integer=True),
         )
-    return {"type": "Feature", "id": identifier, "geometry": geometry, "properties": props}
+    return {"type": "Feature", "geometry": compact_geometry(geometry), "properties": props}, attrs
 
 
-def normalize_collection(payload, kind):
+def normalize_with_attributes(payload, kind):
+    """Validate a source FeatureCollection; return (compact collection, {feature id: original attributes})."""
     if kind not in GEOMETRY_TYPES:
         raise DataError(f"Unknown layer: {kind!r}")
     if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
@@ -256,76 +280,47 @@ def normalize_collection(payload, kind):
     seen = set()
     for index, feature in enumerate(features):
         try:
-            item = normalize_feature(feature, kind)
-            if item["id"] in seen:
-                raise DataError(f"Duplicate objectid: {item['id']}")
-            seen.add(item["id"])
-            normalized.append(item)
+            item, attrs = normalize_feature(feature, kind)
+            identifier = item["properties"]["id"]
+            if identifier in seen:
+                raise DataError(f"Duplicate objectid: {identifier}")
+            seen.add(identifier)
+            normalized.append((attrs["objectid"], item, attrs))
         except DataError as exc:
             raise DataError(f"{kind} feature #{index + 1}: {exc}") from exc
-    normalized.sort(key=lambda item: item["properties"]["attributes"]["objectid"])
-    return {"type": "FeatureCollection", "features": normalized}
+    normalized.sort(key=lambda entry: entry[0])
+    collection = {"type": "FeatureCollection", "features": [item for _, item, _ in normalized]}
+    attributes = {item["properties"]["id"]: attrs for _, item, attrs in normalized}
+    return collection, attributes
 
 
-def build_snapshot(fetch=fetch_json):
+def normalize_collection(payload, kind):
+    """Compact FeatureCollection only (attributes are split off by normalize_with_attributes)."""
+    return normalize_with_attributes(payload, kind)[0]
+
+
+def build_inventory(fetcher: Fetcher):
+    """Fetch and verify all four sources.
+
+    Returns (collections by kind, attribute tables by kind keyed by feature id,
+    SourceRecords with group "inventory").
+    """
     collections = {}
+    attributes = {}
     sources = []
     for spec in SOURCES:
         url, metadata_url = source_urls(spec)
         try:
-            reference = reference_date(fetch(metadata_url), spec)
-            collection = normalize_collection(fetch(url), spec["id"])
+            reference = reference_date(fetcher.get_json(metadata_url), spec)
+            collection, attrs = normalize_with_attributes(fetcher.get_json(url), spec["id"])
         except DataError as exc:
             raise DataError(f"{spec['id']}: {exc}") from exc
         collections[spec["id"]] = collection
+        attributes[spec["id"]] = attrs
         sources.append({
-            "id": spec["id"], "name": spec["name"], "url": url,
+            "id": spec["id"], "group": "inventory", "name": spec["name"], "url": url,
             "metadataUrl": metadata_url, "license": "CC0-1.0", "referenceDate": reference,
-            "retrievedAt": utc_now(), "featureCount": len(collection["features"]),
+            "retrievedAt": utc_now(), "recordCount": len(collection["features"]),
             "caveat": spec["caveat"],
         })
-    return {"schemaVersion": 1, "generatedAt": utc_now(), "sources": sources, "collections": collections}
-
-
-def write_snapshot(snapshot, output):
-    """Complete serialization before atomic replacement, including on disk errors."""
-    output = Path(output)
-    encoded = json.dumps(snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent,
-                                         prefix=f".{output.name}.", suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.chmod(0o644)
-        os.replace(temporary, output)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def refresh(output, fetch=fetch_json):
-    snapshot = build_snapshot(fetch)
-    write_snapshot(snapshot, output)
-    return snapshot
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output JSON path (default: public/data/porto-parking.json)")
-    args = parser.parse_args(argv)
-    try:
-        snapshot = refresh(args.output)
-    except (DataError, OSError, ValueError) as exc:
-        print(f"Porto data refresh failed; previous snapshot was not replaced: {exc}", file=sys.stderr)
-        return 1
-    counts = ", ".join(f"{source['id']}={source['featureCount']}" for source in snapshot["sources"])
-    print(f"Wrote {args.output}: {counts}. Inventory/tariffs only; not live availability or occupancy.")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    return collections, attributes, sources
